@@ -104,10 +104,36 @@ const effectiveSchema = computed(() => {
 const filteredTables = computed(() => {
   const q = tableSearch.value.trim().toLowerCase()
   if (!q) return tables.value
-  return tables.value.filter((t) => `${t.schema}.${t.name}`.toLowerCase().includes(q))
+  return tables.value.filter((t) => `${t.name} ${t.schema}`.toLowerCase().includes(q))
 })
 
 const showLogout = computed(() => Boolean(auth.token || auth.user))
+
+type TableGroup = { letter: string; items: TableMeta[] }
+
+const tableGroups = computed<TableGroup[]>(() => {
+  const items = [...filteredTables.value].sort((a, b) => a.name.localeCompare(b.name))
+  const byLetter = new Map<string, TableMeta[]>()
+  for (const t of items) {
+    const first = (t.name || '').trim().charAt(0).toUpperCase()
+    const letter = /^[A-Z]$/.test(first) ? first : '#'
+    if (!byLetter.has(letter)) byLetter.set(letter, [])
+    byLetter.get(letter)!.push(t)
+  }
+  const letters = Array.from(byLetter.keys()).sort((a, b) => {
+    if (a === '#') return 1
+    if (b === '#') return -1
+    return a.localeCompare(b)
+  })
+  return letters.map((l) => ({ letter: l, items: byLetter.get(l)! }))
+})
+
+function clearSelectedTable() {
+  selectedTable.value = null
+  columns.value = []
+  indexes.value = []
+  dataPreview.value = null
+}
 
 async function loadConnections() {
   const { data } = await http.get<{ connections: Connection[] }>('/api/connections')
@@ -783,27 +809,53 @@ async function submitRowUpdate() {
     <div class="layout">
     <aside class="left-rail">
       <div class="nav-btns">
-        <button :class="{ on: nav === 'tables' }" type="button" @click="nav = 'tables'">Tables</button>
+        <button :class="{ on: nav === 'chat' }" type="button" @click="nav = 'chat'">Chat SQL</button>
+        <button :class="{ on: nav === 'tables' }" type="button" @click="nav = 'tables'; clearSelectedTable()">Tables</button>
         <button :class="{ on: nav === 'queries' }" type="button" @click="nav = 'queries'">Queries</button>
         <button :class="{ on: nav === 'users' }" type="button" @click="nav = 'users'">Users</button>
-        <button :class="{ on: nav === 'chat' }" type="button" @click="nav = 'chat'">Chat SQL</button>
-      </div>
-      <div class="table-block">
-        <div class="table-block-title">Tables ({{ selectedSchema }})</div>
-        <ul class="list table-scroll">
-          <li v-for="t in filteredTables" :key="t.schema + '.' + t.name" @click="openTable(t)">
-            <span class="kind">{{ t.kind === 'view' ? 'V' : 'T' }}</span> {{ t.schema }}.{{ t.name }}
-          </li>
-        </ul>
-        <input v-model="tableSearch" class="search rail-search" type="search" placeholder="Search tables…" />
       </div>
     </aside>
 
     <main class="main">
       <div v-if="nav === 'tables'" class="panel browse">
         <div class="pane-wide">
-          <template v-if="selectedTable">
-            <h3>{{ selectedTable.schema }}.{{ selectedTable.name }}</h3>
+          <template v-if="!selectedTable">
+            <div class="tables-topbar">
+              <input
+                v-model="tableSearch"
+                class="search tables-search"
+                type="search"
+                placeholder="Search tables…"
+                autocomplete="off"
+              />
+            </div>
+
+            <div class="tables-groups" role="list">
+              <section v-for="g in tableGroups" :key="g.letter" class="tables-group" role="listitem">
+                <div class="tables-letter">{{ g.letter }}</div>
+                <div class="tables-items">
+                  <button
+                    v-for="t in g.items"
+                    :key="t.schema + '.' + t.name"
+                    type="button"
+                    class="table-chip"
+                    @click="openTable(t)"
+                  >
+                    <span class="table-chip-name">{{ t.name }}</span>
+                    <span class="table-chip-kind">{{ t.kind === 'view' ? 'view' : 'table' }}</span>
+                  </button>
+                </div>
+              </section>
+            </div>
+          </template>
+
+          <template v-else>
+            <div class="tables-detail-topbar">
+              <button type="button" class="ghost" @click="clearSelectedTable">All tables</button>
+              <div class="tables-detail-title">
+                <h3>{{ selectedTable.schema }}.{{ selectedTable.name }}</h3>
+              </div>
+            </div>
             <div class="tabs">
               <button :class="{ on: tableTab === 'structure' }" type="button" @click="tableTab = 'structure'">
                 Structure
@@ -867,7 +919,6 @@ async function submitRowUpdate() {
               </table>
             </div>
           </template>
-          <p v-else class="muted">Select a table from the sidebar</p>
         </div>
       </div>
 
@@ -1250,7 +1301,7 @@ async function submitRowUpdate() {
   gap: 0.35rem;
 }
 .nav-btns button,
-.left-rail .table-block .list li {
+.left-rail .list li {
   text-align: left;
 }
 .nav-btns button {
@@ -1265,28 +1316,80 @@ async function submitRowUpdate() {
   background: #1f6feb33;
   border-color: #1f6feb;
 }
-.table-block {
-  flex: 1;
+.tables-topbar {
   display: flex;
-  flex-direction: column;
-  min-height: 0;
-  border-top: 1px solid #30363d;
-  padding-top: 0.5rem;
-  margin-top: 0.25rem;
+  gap: 0.75rem;
+  align-items: center;
+  margin-bottom: 0.75rem;
 }
-.table-block-title {
-  font-size: 0.8rem;
+.tables-search {
+  width: 100%;
+  max-width: 520px;
+}
+.tables-groups {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 0.85rem 1rem;
+  align-items: start;
+}
+.tables-group {
+  border: 1px solid #30363d;
+  border-radius: 10px;
+  background: #0b0e14;
+  padding: 0.75rem;
+  min-width: 0;
+}
+.tables-letter {
+  font-size: 1.35rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  line-height: 1;
+  margin-bottom: 0.5rem;
+  color: #e6edf3;
+}
+.tables-items {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 0.35rem 0.45rem;
+}
+.table-chip {
+  text-align: left;
+  border: 1px solid #30363d;
+  background: #161b22;
+  color: #e6edf3;
+  border-radius: 8px;
+  padding: 0.4rem 0.5rem;
+  cursor: pointer;
+  min-width: 0;
+}
+.table-chip:hover {
+  border-color: #58a6ff;
+  box-shadow: 0 0 0 1px #58a6ff22;
+}
+.table-chip-name {
+  display: block;
+  font-size: 0.85rem;
+  line-height: 1.15;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.table-chip-kind {
+  display: block;
+  font-size: 0.7rem;
   color: #8b949e;
+  margin-top: 0.15rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.tables-detail-topbar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
   margin-bottom: 0.35rem;
 }
-.table-scroll {
-  flex: 1;
-  overflow: auto;
-  min-height: 80px;
-}
-.rail-search {
-  margin-top: 0.5rem;
-  flex-shrink: 0;
+.tables-detail-title {
+  min-width: 0;
 }
 .link {
   background: none;
@@ -1381,7 +1484,7 @@ h3 {
   cursor: pointer;
   font-size: 0.85rem;
 }
-.table-block .list li:hover {
+.left-rail .list li:hover {
   background: #21262d;
 }
 .kind {
