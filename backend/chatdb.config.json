@@ -1,0 +1,8 @@
+{
+  "listen": "127.0.0.1:3000",
+  "jwt_secret": "dev-jwt-secret-do-not-use-in-production-7f3a9c2e1b8d4f6a0e5c3b7d9a1f4e8c",
+  "app_key": "32-byte-key-change-me-aaaaaaaaaa",
+  "metadata": {
+    "path": "chatdb.meta.sqlite"
+  }
+}

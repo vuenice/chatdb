@@ -1,0 +1,25 @@
+services:
+  appdb:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: chatdb
+      POSTGRES_PASSWORD: chatdb
+      POSTGRES_DB: chatdb_app
+    ports:
+      - '5433:5432'
+    volumes:
+      - appdb_data:/var/lib/postgresql/data
+
+  sampledb:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: sample
+    ports:
+      - '5434:5432'
+    volumes:
+      - ./scripts/init-sample-db.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+
+volumes:
+  appdb_data: {}
