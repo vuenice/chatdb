@@ -7,8 +7,8 @@ import { useAuthStore } from '../stores/auth'
 const router = useRouter()
 const auth = useAuthStore()
 
-type Nav = 'tables' | 'queries' | 'users' | 'chat'
-type QueriesTab = 'saved' | 'recent' | 'running'
+type Nav = 'tables' | 'queries' | 'users' | 'history'
+type QueriesTab = 'chatsql' | 'saved' | 'running'
 type TableTab = 'structure' | 'data' | 'indexes'
 
 interface Connection {
@@ -31,7 +31,8 @@ interface TableMeta {
 }
 
 const nav = ref<Nav>('tables')
-const chatPinned = ref(false)
+/** Display name for the active SQL "file" in the workbench header. */
+const queryFileName = ref('untitled.sql')
 const connections = ref<Connection[]>([])
 const selectedConnId = ref<number | null>(null)
 const databases = ref<string[]>([])
@@ -53,13 +54,33 @@ const poolMode = ref<'read' | 'write'>('read')
 const execResult = ref<{ columns: string[]; rows: unknown[][]; row_count: number; message?: string } | null>(null)
 const execError = ref('')
 const lastRunId = ref<string | null>(null)
+/** Seconds, for results header (e.g. 0.43s) */
+const lastRunSeconds = ref<number | null>(null)
+const resultsFilter = ref('')
 
-const queriesTab = ref<QueriesTab>('recent')
-const savedQueries = ref<{ id: number; title: string; sql: string; is_saved: boolean; last_run_at?: string }[]>([])
+const sqlGutter = ref<HTMLElement | null>(null)
+const sqlTextarea = ref<HTMLTextAreaElement | null>(null)
+
+const queriesTab = ref<QueriesTab>('chatsql')
+const savedQueries = ref<
+  { id: number; title: string; sql: string; is_saved: boolean; last_run_at?: string; updated_at?: string }[]
+>([])
+const openSavedQueryMenuId = ref<number | null>(null)
+/** Recent runs + saved, for the History (Conversations) panel */
+const queryHistory = ref<typeof savedQueries.value>([])
+const historySearch = ref('')
+const selectedHistoryId = ref<number | null>(null)
 const runningQueries = ref<{ run_id: string; sql_snippet: string; started: string }[]>([])
 
 const chatInput = ref('')
-const chatLog = ref<{ role: 'user' | 'assistant'; text: string }[]>([])
+const chatLog = ref<
+  Array<{ role: 'user'; text: string } | { role: 'assistant'; text: string; suggestedSql?: string }>
+>([])
+
+const explainOpen = ref(false)
+const explainText = ref('')
+const explainError = ref('')
+const explainLoading = ref(false)
 
 const accountMenuOpen = ref(false)
 const accountWrap = ref<HTMLElement | null>(null)
@@ -90,6 +111,25 @@ function dbParams(): Record<string, string> {
 
 const currentConnection = computed(() => connections.value.find((x) => x.id === selectedConnId.value) ?? null)
 
+const sqlLineNumbers = computed(() => {
+  const n = (sqlText.value || '').split('\n').length
+  return Array.from({ length: Math.max(1, n) }, (_, i) => i + 1)
+})
+
+const displayExecRows = computed(() => {
+  const r = execResult.value
+  if (!r || r.message) return []
+  const q = resultsFilter.value.trim().toLowerCase()
+  if (!q) return r.rows
+  return r.rows.filter((row) => row.some((cell) => String(cell ?? '').toLowerCase().includes(q)))
+})
+
+function onSqlEditorScroll() {
+  if (sqlGutter.value && sqlTextarea.value) {
+    sqlGutter.value.scrollTop = sqlTextarea.value.scrollTop
+  }
+}
+
 /** MySQL uses the physical database name as information_schema.table_schema, not "public". */
 const effectiveSchema = computed(() => {
   const c = currentConnection.value
@@ -108,6 +148,271 @@ const filteredTables = computed(() => {
 })
 
 const showLogout = computed(() => Boolean(auth.token || auth.user))
+
+const selectedHistoryQuery = computed(
+  () => queryHistory.value.find((q) => q.id === selectedHistoryId.value) ?? null,
+)
+
+function startOfLocalDay(d: Date): Date {
+  const x = new Date(d)
+  x.setHours(0, 0, 0, 0)
+  return x
+}
+
+function historyTimeGroupLabel(d: Date, now: Date): string {
+  const sod = startOfLocalDay(now)
+  const dayMs = 864e5
+  if (d >= sod) return 'Today'
+  if (d >= new Date(sod.getTime() - dayMs)) return 'Yesterday'
+  return 'Earlier'
+}
+
+const historyGroups = computed(() => {
+  const q = historySearch.value.trim().toLowerCase()
+  const now = new Date()
+  const items = queryHistory.value
+    .filter((row) => {
+      if (!q) return true
+      const t = (row.title || '').toLowerCase()
+      return t.includes(q) || (row.sql || '').toLowerCase().includes(q)
+    })
+    .sort((a, b) => {
+      const ta = a.last_run_at ? new Date(a.last_run_at).getTime() : 0
+      const tb = b.last_run_at ? new Date(b.last_run_at).getTime() : 0
+      return tb - ta
+    })
+  const orderLabels = ['Today', 'Yesterday', 'Earlier'] as const
+  const byLabel = new Map<string, (typeof items)[number][]>()
+  for (const l of orderLabels) byLabel.set(l, [])
+  for (const row of items) {
+    const d = row.last_run_at ? new Date(row.last_run_at) : new Date(0)
+    const label = historyTimeGroupLabel(d, now)
+    if (!byLabel.has(label)) byLabel.set(label, [])
+    byLabel.get(label)!.push(row)
+  }
+  return orderLabels
+    .filter((lab) => (byLabel.get(lab) ?? []).length > 0)
+    .map((label) => ({ label, items: byLabel.get(label) ?? [] }))
+})
+
+function formatHistoryListTime(s?: string): string {
+  if (!s) return ''
+  const d = new Date(s)
+  if (Number.isNaN(d.getTime())) return ''
+  return d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
+}
+
+function formatHistoryHeaderTime(s?: string): string {
+  if (!s) return '—'
+  const d = new Date(s)
+  if (Number.isNaN(d.getTime())) return '—'
+  return d.toLocaleString()
+}
+
+function queryKindTag(sql: string): string | null {
+  const u = sql.toUpperCase()
+  if (/\bJOIN\b/.test(u)) return 'join'
+  if (/\bGROUP\s+BY\b/.test(u)) return 'aggregate'
+  return null
+}
+
+const SQL_KEYWORDS = new Set(
+  [
+    'SELECT',
+    'FROM',
+    'WHERE',
+    'JOIN',
+    'INNER',
+    'LEFT',
+    'RIGHT',
+    'FULL',
+    'OUTER',
+    'CROSS',
+    'ON',
+    'AND',
+    'OR',
+    'NOT',
+    'AS',
+    'WITH',
+    'UNION',
+    'ALL',
+    'ORDER',
+    'BY',
+    'GROUP',
+    'HAVING',
+    'LIMIT',
+    'OFFSET',
+    'INSERT',
+    'INTO',
+    'VALUES',
+    'UPDATE',
+    'SET',
+    'DELETE',
+    'CREATE',
+    'ALTER',
+    'DROP',
+    'TABLE',
+    'INDEX',
+    'CONSTRAINT',
+    'PRIMARY',
+    'KEY',
+    'FOREIGN',
+    'REFERENCES',
+    'NULL',
+    'IS',
+    'IN',
+    'LIKE',
+    'BETWEEN',
+    'CASE',
+    'WHEN',
+    'THEN',
+    'ELSE',
+    'END',
+    'DISTINCT',
+    'TRUE',
+    'FALSE',
+    'COUNT',
+    'SUM',
+    'AVG',
+    'MIN',
+    'MAX',
+    'COALESCE',
+    'CAST',
+    'EXISTS',
+    'RETURNING',
+  ].map((k) => k.toUpperCase()),
+)
+
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
+function highlightSqlToHtml(src: string): string {
+  const out: string[] = []
+  const n = src.length
+  let i = 0
+  while (i < n) {
+    if (src[i] === "'") {
+      const start = i
+      i++
+      while (i < n) {
+        if (src[i] === "'") {
+          if (i + 1 < n && src[i + 1] === "'") {
+            i += 2
+            continue
+          }
+          i++
+          break
+        }
+        i++
+      }
+      out.push(`<span class="sql-hl-str">${escapeHtml(src.slice(start, i))}</span>`)
+      continue
+    }
+    if (src[i] === '"') {
+      const start = i
+      i++
+      while (i < n) {
+        if (src[i] === '\\' && i + 1 < n) {
+          i += 2
+          continue
+        }
+        if (src[i] === '"') {
+          i++
+          break
+        }
+        i++
+      }
+      out.push(`<span class="sql-hl-str">${escapeHtml(src.slice(start, i))}</span>`)
+      continue
+    }
+    if (/\s/.test(src[i])) {
+      out.push(escapeHtml(src[i]!))
+      i++
+      continue
+    }
+    if (/\d/.test(src[i]!)) {
+      const start = i
+      while (i < n && /[\d.]/.test(src[i]!)) i++
+      out.push(`<span class="sql-hl-num">${escapeHtml(src.slice(start, i))}</span>`)
+      continue
+    }
+    if (/[a-zA-Z_]/.test(src[i]!)) {
+      const start = i
+      i++
+      while (i < n && /[a-zA-Z0-9_]/.test(src[i]!)) i++
+      const w = src.slice(start, i)
+      const up = w.toUpperCase()
+      if (SQL_KEYWORDS.has(up)) {
+        out.push(`<span class="sql-hl-kw">${escapeHtml(w)}</span>`)
+      } else {
+        out.push(`<span class="sql-hl-id">${escapeHtml(w)}</span>`)
+      }
+      continue
+    }
+    out.push(escapeHtml(src[i]!))
+    i++
+  }
+  return out.join('')
+}
+
+function formatRelativeModified(iso?: string): string {
+  if (!iso) return '—'
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return '—'
+  const diffSec = (Date.now() - d.getTime()) / 1000
+  if (diffSec < 45) return 'just now'
+  if (diffSec < 3600) return `${Math.max(1, Math.floor(diffSec / 60))}m ago`
+  if (diffSec < 86400) return `${Math.max(1, Math.floor(diffSec / 3600))}h ago`
+  if (diffSec < 604800) return `${Math.max(1, Math.floor(diffSec / 86400))}d ago`
+  if (diffSec < 2628000) return `${Math.max(1, Math.floor(diffSec / 604800))}w ago`
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+}
+
+function savedQueryPills(q: { sql: string }): string[] {
+  const k = queryKindTag(q.sql)
+  const a: string[] = [k ? k[0]!.toUpperCase() + k.slice(1) : 'Query', 'Saved']
+  return a.slice(0, 2)
+}
+
+function sqlSnippetForCard(sql: string, maxLines = 5, maxChars = 420): string {
+  const raw = (sql || '').replace(/\r\n/g, '\n')
+  if (!raw.trim()) return ''
+  const lines = raw.split('\n')
+  const take = lines.slice(0, maxLines).join('\n')
+  let out = take.length > maxChars ? take.slice(0, maxChars) : take
+  if (take.length > maxChars) out += '…'
+  else if (lines.length > maxLines) out += '\n…'
+  return out
+}
+
+const savedDataSourceLabel = computed(() => {
+  const c = currentConnection.value
+  if (!c) return 'Connection'
+  const name = (c.name || '').trim() || 'Connection'
+  return name
+})
+
+function runSavedFromCard(q: (typeof savedQueries.value)[0]) {
+  openSavedQueryMenuId.value = null
+  pickQuery(q)
+  void runSql()
+}
+
+async function deleteSavedQueryItem(q: (typeof savedQueries.value)[0]) {
+  if (!selectedConnId.value) return
+  try {
+    await http.delete(`/api/connections/${selectedConnId.value}/queries/${q.id}`, { params: dbParams() })
+    openSavedQueryMenuId.value = null
+    await loadQueries()
+  } catch {
+    /* */
+  }
+}
+
+function toggleSavedQueryMenu(id: number) {
+  openSavedQueryMenuId.value = openSavedQueryMenuId.value === id ? null : id
+}
 
 type TableGroup = { letter: string; items: TableMeta[] }
 
@@ -245,6 +550,7 @@ async function createCatalogUser() {
 
 async function loadQueries() {
   if (!selectedConnId.value) return
+  if (queriesTab.value === 'chatsql') return
   if (queriesTab.value === 'running') {
     const { data } = await http.get<{ runs: typeof runningQueries.value }>(
       `/api/connections/${selectedConnId.value}/queries/running`,
@@ -256,18 +562,47 @@ async function loadQueries() {
   const saved = queriesTab.value === 'saved'
   const qparams: Record<string, string> = { ...dbParams() }
   if (saved) qparams.saved = '1'
-  const { data } = await http.get<{ queries: typeof savedQueries.value }>(
+  const { data } = await http.get<{
+    queries: (typeof savedQueries.value[0] & {
+      LastRunAt?: string
+      UpdatedAt?: string
+    })[]
+  }>(`/api/connections/${selectedConnId.value}/queries`, { params: qparams })
+  savedQueries.value = (data.queries || []).map((r) => ({
+    id: r.id,
+    title: r.title,
+    sql: r.sql,
+    is_saved: r.is_saved,
+    last_run_at: r.last_run_at ?? (r as { LastRunAt?: string }).LastRunAt,
+    updated_at: r.updated_at ?? (r as { UpdatedAt?: string }).UpdatedAt,
+  }))
+}
+
+async function loadQueryHistory() {
+  if (!selectedConnId.value) return
+  const { data } = await http.get<{ queries: typeof queryHistory.value }>(
     `/api/connections/${selectedConnId.value}/queries`,
-    { params: qparams },
+    { params: { ...dbParams() } },
   )
-  savedQueries.value = data.queries
+  queryHistory.value = data.queries
+  if (queryHistory.value.length) {
+    const stillThere = queryHistory.value.some((q) => q.id === selectedHistoryId.value)
+    if (selectedHistoryId.value == null || !stillThere) {
+      selectedHistoryId.value = queryHistory.value[0].id
+    }
+  } else {
+    selectedHistoryId.value = null
+  }
 }
 
 async function runSql() {
   execError.value = ''
   execResult.value = null
   lastRunId.value = null
+  lastRunSeconds.value = null
+  resultsFilter.value = ''
   if (!selectedConnId.value) return
+  const t0 = performance.now()
   try {
     const { data } = await http.post(`/api/connections/${selectedConnId.value}/sql/execute`, {
       sql: sqlText.value,
@@ -276,6 +611,7 @@ async function runSql() {
       database: selectedPhysicalDatabase.value || undefined,
       role: selectedRole.value || undefined,
     })
+    lastRunSeconds.value = (performance.now() - t0) / 1000
     lastRunId.value = data.run_id as string
     execResult.value = data.result as typeof execResult.value
     await http.post(
@@ -294,23 +630,102 @@ async function cancelRun() {
   await http.post(`/api/connections/${selectedConnId.value}/sql/cancel`, { run_id: lastRunId.value })
 }
 
+function applySqlToEditor(sql: string) {
+  sqlText.value = sql
+}
+
+function onChatKeydown(e: KeyboardEvent) {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault()
+    void sendChat()
+  }
+}
+
 async function sendChat() {
   if (!selectedConnId.value || !chatInput.value.trim()) return
   const q = chatInput.value.trim()
   chatLog.value.push({ role: 'user', text: q })
   chatInput.value = ''
   try {
-    const { data } = await http.post<{ sql: string }>(
+    const { data } = await http.post<{ sql?: string; error?: string }>(
       `/api/connections/${selectedConnId.value}/ai/chat`,
       { message: q },
       { params: dbParams() },
     )
-    chatLog.value.push({ role: 'assistant', text: data.sql })
-    sqlText.value = data.sql
+    if (data.error) {
+      chatLog.value.push({ role: 'assistant', text: data.error })
+      return
+    }
+    const sql = (data.sql || '').trim()
+    if (sql) {
+      chatLog.value.push({
+        role: 'assistant',
+        text: 'Here is a query you can apply to the editor, then run when ready.',
+        suggestedSql: sql,
+      })
+    } else {
+      chatLog.value.push({ role: 'assistant', text: 'No SQL was returned for that message.' })
+    }
   } catch (e: unknown) {
     const err = e as { response?: { data?: { error?: string } } }
     chatLog.value.push({ role: 'assistant', text: 'Error: ' + (err.response?.data?.error || 'failed') })
   }
+}
+
+async function runExplainForSql(sql: string) {
+  explainError.value = ''
+  explainText.value = ''
+  if (!selectedConnId.value || !sql.trim()) return
+  explainOpen.value = true
+  explainLoading.value = true
+  try {
+    const { data } = await http.post<{ plan?: unknown; error?: string }>(
+      `/api/connections/${selectedConnId.value}/sql/explain`,
+      { sql },
+      { params: dbParams() },
+    )
+    if (data.error) {
+      explainError.value = data.error
+      return
+    }
+    explainText.value =
+      data.plan === null || data.plan === undefined
+        ? ''
+        : typeof data.plan === 'string'
+          ? data.plan
+          : JSON.stringify(data.plan, null, 2)
+  } catch (e: unknown) {
+    const err = e as { response?: { data?: { error?: string } } }
+    explainError.value = err.response?.data?.error || 'EXPLAIN request failed'
+  } finally {
+    explainLoading.value = false
+  }
+}
+
+function closeExplainModal() {
+  explainOpen.value = false
+  explainText.value = ''
+  explainError.value = ''
+}
+
+function downloadResultsCsv() {
+  const r = execResult.value
+  if (!r || r.message || !r.columns.length) return
+  const esc = (v: unknown) => {
+    const s = String(v ?? '')
+    if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`
+    return s
+  }
+  const lines = [r.columns.map(esc).join(',')]
+  for (const row of r.rows) {
+    lines.push(row.map(esc).join(','))
+  }
+  const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8' })
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(blob)
+  a.download = (queryFileName.value || 'query').replace(/\.sql$/i, '') + '-results.csv'
+  a.click()
+  URL.revokeObjectURL(a.href)
 }
 
 async function saveCurrentQuery() {
@@ -345,6 +760,7 @@ watch(selectedConnId, async () => {
     await loadTables()
     await loadCatalogRoles()
     await loadQueries()
+    if (nav.value === 'history') await loadQueryHistory()
   }
 })
 
@@ -379,6 +795,7 @@ watch(
   () => nav.value,
   (n) => {
     if (n === 'users') void loadLoginUsers()
+    if (n === 'history') void loadQueryHistory()
   },
 )
 
@@ -447,6 +864,9 @@ function onGlobalPointerDown(ev: PointerEvent) {
   if (accountMenuOpen.value && accountWrap.value && !accountWrap.value.contains(t)) {
     accountMenuOpen.value = false
   }
+  if (openSavedQueryMenuId.value !== null && t instanceof Element && !t.closest('.saved-query-menu')) {
+    openSavedQueryMenuId.value = null
+  }
 }
 
 onMounted(async () => {
@@ -458,9 +878,49 @@ onUnmounted(() => {
   document.removeEventListener('pointerdown', onGlobalPointerDown, true)
 })
 
-function pickQuery(q: { sql: string }) {
+function pickQuery(q: { sql: string; title?: string }) {
   sqlText.value = q.sql
   nav.value = 'queries'
+  queriesTab.value = 'chatsql'
+  const t = (q.title || 'untitled').replace(/[^a-z0-9_.-]+/gi, '-').toLowerCase()
+  queryFileName.value = t.endsWith('.sql') ? t : `${t}.sql`
+}
+
+function exportHistorySql() {
+  const q = selectedHistoryQuery.value
+  if (!q) return
+  const base = (q.title || 'query').replace(/[^a-z0-9_.-]+/gi, '-').toLowerCase() || 'query'
+  const blob = new Blob([q.sql], { type: 'text/sql;charset=utf-8' })
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(blob)
+  a.download = base.endsWith('.sql') ? base : `${base}.sql`
+  a.click()
+  URL.revokeObjectURL(a.href)
+}
+
+async function deleteHistoryQuery() {
+  const q = selectedHistoryQuery.value
+  if (!q || !selectedConnId.value) return
+  try {
+    await http.delete(`/api/connections/${selectedConnId.value}/queries/${q.id}`, { params: dbParams() })
+    if (selectedHistoryId.value === q.id) selectedHistoryId.value = null
+    await loadQueryHistory()
+  } catch {
+    /* surface via toast in future */
+  }
+}
+
+function rerunFromHistory() {
+  const q = selectedHistoryQuery.value
+  if (!q) return
+  pickQuery(q)
+  void runSql()
+}
+
+function forkHistoryToWorkbench() {
+  const q = selectedHistoryQuery.value
+  if (!q) return
+  pickQuery({ sql: q.sql, title: q.title })
 }
 
 function columnMeta(name: string) {
@@ -788,6 +1248,22 @@ async function submitRowUpdate() {
       </div>
     </div>
 
+    <div v-if="explainOpen" class="modal-backdrop" @click.self="closeExplainModal">
+      <div class="modal modal-wide" role="dialog" aria-modal="true" aria-labelledby="explain-title" @click.stop>
+        <div class="modal-header">
+          <h2 id="explain-title" class="modal-title">Explain plan</h2>
+          <button type="button" class="modal-close" aria-label="Close" @click="closeExplainModal">×</button>
+        </div>
+        <p v-if="explainLoading" class="muted small">Loading…</p>
+        <p v-else-if="explainError" class="error">{{ explainError }}</p>
+        <pre v-else-if="explainText" class="mono preview-sql explain-body">{{ explainText }}</pre>
+        <p v-else class="muted small">No plan returned.</p>
+        <div class="modal-actions">
+          <button type="button" class="ghost" @click="closeExplainModal">Close</button>
+        </div>
+      </div>
+    </div>
+
     <div v-if="createDbModalOpen" class="modal-backdrop" @click.self="closeCreateDbModal">
       <div class="modal" role="dialog" aria-modal="true" aria-labelledby="create-db-title" @click.stop>
         <h2 id="create-db-title" class="modal-title">Create new database</h2>
@@ -807,11 +1283,26 @@ async function submitRowUpdate() {
     </div>
 
     <div class="layout">
-    <aside class="left-rail">
+    <aside class="left-rail" aria-label="Main navigation">
       <div class="nav-btns">
-        <button :class="{ on: nav === 'chat' }" type="button" @click="nav = 'chat'">Chat SQL</button>
-        <button :class="{ on: nav === 'tables' }" type="button" @click="nav = 'tables'; clearSelectedTable()">Tables</button>
-        <button :class="{ on: nav === 'queries' }" type="button" @click="nav = 'queries'">Queries</button>
+        <button
+          :class="{ on: nav === 'queries' && queriesTab === 'chatsql' }"
+          type="button"
+          @click="nav = 'queries'; queriesTab = 'chatsql'"
+        >
+          Chat SQL
+        </button>
+        <button :class="{ on: nav === 'tables' }" type="button" @click="nav = 'tables'; clearSelectedTable()">
+          Tables
+        </button>
+        <button :class="{ on: nav === 'history' }" type="button" @click="nav = 'history'">History</button>
+        <button
+          :class="{ on: nav === 'queries' && queriesTab !== 'chatsql' }"
+          type="button"
+          @click="nav = 'queries'; queriesTab = 'saved'"
+        >
+          Queries
+        </button>
         <button :class="{ on: nav === 'users' }" type="button" @click="nav = 'users'">Users</button>
       </div>
     </aside>
@@ -956,77 +1447,333 @@ async function submitRowUpdate() {
         </div>
       </div>
 
-      <div v-else-if="nav === 'queries'" class="panel vertical">
-        <div class="tabs qtabs">
-          <button :class="{ on: queriesTab === 'saved' }" type="button" @click="queriesTab = 'saved'">Saved</button>
-          <button :class="{ on: queriesTab === 'recent' }" type="button" @click="queriesTab = 'recent'">Recent</button>
-          <button :class="{ on: queriesTab === 'running' }" type="button" @click="queriesTab = 'running'">Running</button>
-        </div>
-        <div class="editor-block">
-          <textarea v-model="sqlText" class="sql" spellcheck="false" />
-          <div class="actions">
-            <button type="button" class="primary" @click="runSql">Run</button>
-            <button type="button" class="ghost" :disabled="!lastRunId" @click="cancelRun">Cancel run</button>
-            <button type="button" class="ghost" @click="saveCurrentQuery">Save</button>
+      <div v-else-if="nav === 'history'" class="history-workspace">
+        <aside class="history-list-pane" aria-label="Conversations">
+          <div class="history-list-head">
+            <h2 class="history-list-title">Conversations</h2>
+            <input
+              v-model="historySearch"
+              class="search history-search"
+              type="search"
+              placeholder="Search logs, queries…"
+              autocomplete="off"
+            />
           </div>
-          <p v-if="execError" class="error">{{ execError }}</p>
-          <div v-if="execResult" class="scroll result">
-            <p v-if="execResult.message" class="muted">{{ execResult.message }}</p>
-            <table v-else class="grid">
-              <thead>
-                <tr>
-                  <th v-for="c in execResult.columns" :key="c">{{ c }}</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="(row, i) in execResult.rows" :key="i">
-                  <td v-for="(cell, j) in row" :key="j">{{ cell }}</td>
-                </tr>
-              </tbody>
-            </table>
+          <div class="history-groups scroll">
+            <p v-if="!queryHistory.length" class="muted small history-empty">No conversations yet. Run a query from Chat SQL.</p>
+            <template v-else>
+              <section v-for="g in historyGroups" :key="g.label" class="history-group">
+                <div class="history-group-label">{{ g.label }}</div>
+                <ul class="history-items">
+                  <li v-for="q in g.items" :key="q.id">
+                    <button
+                      type="button"
+                      class="history-item"
+                      :class="{ 'is-active': q.id === selectedHistoryId }"
+                      @click="selectedHistoryId = q.id"
+                    >
+                      <div class="history-item-title">
+                        <strong>{{ q.title || 'Untitled' }}</strong>
+                        <span class="history-item-time">{{ formatHistoryListTime(q.last_run_at) }}</span>
+                      </div>
+                      <p class="history-item-snippet">{{ (q.sql || '').replace(/\s+/g, ' ').trim().slice(0, 100) }}{{ (q.sql || '').length > 100 ? '…' : '' }}</p>
+                      <span v-if="queryKindTag(q.sql)" class="history-tag">{{ queryKindTag(q.sql) }}</span>
+                    </button>
+                  </li>
+                </ul>
+              </section>
+            </template>
           </div>
-        </div>
-        <div class="side-list">
-          <ul v-if="queriesTab !== 'running'" class="list scroll">
-            <li v-for="q in savedQueries" :key="q.id" @click="pickQuery(q)">
-              <strong>{{ q.title || 'untitled' }}</strong>
-              <pre class="snippet">{{ q.sql.slice(0, 120) }}</pre>
-            </li>
-          </ul>
-          <ul v-else class="list scroll">
-            <li v-for="r in runningQueries" :key="r.run_id">
-              <code>{{ r.run_id }}</code>
-              <pre class="snippet">{{ r.sql_snippet }}</pre>
-            </li>
-          </ul>
+        </aside>
+
+        <div class="history-detail-pane">
+          <template v-if="selectedHistoryQuery">
+            <div class="history-detail-top">
+              <div class="history-detail-titles">
+                <h1 class="history-detail-h1">{{ selectedHistoryQuery.title || 'Untitled' }}</h1>
+                <p class="history-detail-meta muted small">
+                  {{ formatHistoryHeaderTime(selectedHistoryQuery.last_run_at) }}
+                  <span class="history-detail-sep">·</span>
+                  <span class="history-detail-db">{{ selectedPhysicalDatabase || currentConnection?.database || '—' }}</span>
+                </p>
+              </div>
+              <div class="history-detail-actions">
+                <button type="button" class="ghost history-action-btn" @click="rerunFromHistory">Re-run</button>
+                <button type="button" class="ghost history-action-btn" @click="exportHistorySql">Export</button>
+                <button
+                  type="button"
+                  class="ghost history-action-btn history-trash"
+                  title="Delete"
+                  aria-label="Delete conversation"
+                  @click="deleteHistoryQuery"
+                >
+                  <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
+                    <path
+                      d="M6 7h12M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M10 11v6m4-6v6M5 7l1 14a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1l1-14"
+                      stroke="currentColor"
+                      stroke-width="1.5"
+                      stroke-linecap="round"
+                    />
+                  </svg>
+                </button>
+              </div>
+            </div>
+            <div class="history-prompt">
+              <span class="history-prompt-label">Request</span>
+              <p class="history-prompt-text">{{ (selectedHistoryQuery.title || 'SQL session').trim() || '—' }}</p>
+            </div>
+            <div class="history-sql-block">
+              <div class="history-sql-head">
+                <span>SQL</span>
+              </div>
+              <pre class="history-sql-body mono">{{ selectedHistoryQuery.sql }}</pre>
+            </div>
+            <a class="history-exec-hint linkish" href="#" @click.prevent="forkHistoryToWorkbench">Execution result · open in workbench to re-run and preview</a>
+            <div class="history-historical-bar">
+              <span class="history-historical-note">This is a historical view</span>
+              <button type="button" class="primary history-fork" @click="forkHistoryToWorkbench">Fork session</button>
+            </div>
+          </template>
+          <p v-else class="history-detail-placeholder muted">Select a conversation to view details.</p>
         </div>
       </div>
 
-      <div v-else class="panel hint">
-        <p>Open the chat panel on the right to ask questions in natural language (schema-only AI).</p>
+      <div v-else-if="nav === 'queries'" class="queries-workspace">
+        <div class="panel vertical queries-panel-inner">
+          <template v-if="queriesTab === 'chatsql'">
+            <div class="chatsql-split">
+              <div class="chatsql-main">
+                <div class="sql-editor-split">
+                  <div class="sql-editor-pane">
+                    <div class="sql-gutter-wrap">
+                      <div ref="sqlGutter" class="sql-gutter mono" aria-hidden="true">
+                        <div v-for="n in sqlLineNumbers" :key="n" class="sql-gutter-line">{{ n }}</div>
+                      </div>
+                      <textarea
+                        ref="sqlTextarea"
+                        v-model="sqlText"
+                        class="sql sql-input"
+                        spellcheck="false"
+                        @scroll="onSqlEditorScroll"
+                      />
+                    </div>
+                    <div class="sql-workbench-actions sql-editor-foot" role="toolbar" aria-label="Query actions">
+                      <button type="button" class="ghost sql-btn-icon" title="Save query" @click="saveCurrentQuery">
+                        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
+                          <path
+                            d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"
+                            stroke="currentColor"
+                            stroke-width="2"
+                            stroke-linejoin="round"
+                          />
+                          <path d="M17 21v-8H7v8" stroke="currentColor" stroke-width="2" />
+                          <path d="M7 3v5h8" stroke="currentColor" stroke-width="2" />
+                        </svg>
+                        <span class="sql-btn-label">Save</span>
+                      </button>
+                      <button type="button" class="primary run-query-btn" @click="runSql">
+                        <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true">
+                          <path d="M8 5v14l11-7z" />
+                        </svg>
+                        <span>Run query</span>
+                      </button>
+                      <button type="button" class="ghost sql-btn-compact" :disabled="!lastRunId" @click="cancelRun">
+                        Cancel run
+                      </button>
+                    </div>
+                  </div>
+
+                  <div class="sql-results-stack">
+                    <div class="sql-results-head">
+                      <div class="sql-results-title">
+                        <span class="sql-results-heading">Query results</span>
+                        <span v-if="execResult && !execResult.message" class="muted small sql-results-meta">
+                          <template v-if="resultsFilter.trim()">
+                            {{ displayExecRows.length }} of {{ execResult.rows.length }} rows
+                          </template>
+                          <template v-else> {{ execResult.row_count }} rows </template>
+                          <template v-if="lastRunSeconds !== null">· {{ lastRunSeconds.toFixed(2) }}s</template>
+                        </span>
+                      </div>
+                      <div v-if="execResult && !execResult.message" class="sql-results-tools">
+                        <input
+                          v-model="resultsFilter"
+                          type="search"
+                          class="results-filter-input"
+                          placeholder="Filter rows…"
+                          aria-label="Filter result rows"
+                          autocomplete="off"
+                        />
+                        <button
+                          type="button"
+                          class="ghost icon-only"
+                          title="Download CSV"
+                          @click="downloadResultsCsv"
+                        >
+                          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
+                            <path
+                              d="M12 3v12m0 0l4-4m-4 4L8 11M4 21h16"
+                              stroke="currentColor"
+                              stroke-width="2"
+                              stroke-linecap="round"
+                              stroke-linejoin="round"
+                            />
+                          </svg>
+                        </button>
+                      </div>
+                    </div>
+                    <p v-if="execError" class="error sql-results-error">{{ execError }}</p>
+                    <div v-else-if="execResult" class="sql-results-body scroll">
+                      <p v-if="execResult.message" class="muted">{{ execResult.message }}</p>
+                      <table v-else class="grid grid-striped">
+                        <thead>
+                          <tr>
+                            <th v-for="c in execResult.columns" :key="c">{{ c }}</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          <tr v-for="(row, i) in displayExecRows" :key="i">
+                            <td v-for="(cell, j) in row" :key="j">{{ cell }}</td>
+                          </tr>
+                        </tbody>
+                      </table>
+                    </div>
+                    <div v-else class="sql-results-placeholder muted small">Run a query to see results here.</div>
+                  </div>
+                </div>
+              </div>
+
+              <aside class="ai-panel" aria-label="SQL assistant">
+                <div class="ai-panel-header">
+                  <span class="ai-panel-title">ChatDB AI</span>
+                </div>
+                <div class="ai-messages scroll">
+                  <p v-if="!chatLog.length" class="muted small ai-empty">
+                    Ask for a query in natural language. Suggested SQL appears here with actions to apply or explain.
+                  </p>
+                  <div
+                    v-for="(m, i) in chatLog"
+                    :key="i"
+                    :class="['ai-msg', m.role === 'user' ? 'ai-msg-user' : 'ai-msg-assistant']"
+                  >
+                    <div v-if="m.role === 'user'" class="ai-bubble ai-bubble-user">{{ m.text }}</div>
+                    <div v-else class="ai-bubble ai-bubble-assistant">
+                      <p class="ai-assist-text">{{ m.text }}</p>
+                      <template v-if="m.suggestedSql">
+                        <pre class="ai-sql-block mono">{{ m.suggestedSql }}</pre>
+                        <div class="ai-assist-actions">
+                          <button type="button" class="apply-sql-btn" @click="applySqlToEditor(m.suggestedSql!)">
+                            Apply to editor
+                          </button>
+                          <button type="button" class="linkish-btn" @click="runExplainForSql(m.suggestedSql!)">
+                            Explain plan
+                          </button>
+                        </div>
+                      </template>
+                    </div>
+                  </div>
+                </div>
+                <div class="ai-composer">
+                  <textarea
+                    v-model="chatInput"
+                    class="ai-composer-input"
+                    rows="3"
+                    placeholder="Ask ChatDB to generate or debug SQL…"
+                    autocomplete="off"
+                    @keydown="onChatKeydown"
+                  />
+                  <div class="ai-composer-row">
+                    <span class="muted tiny">Press Enter to send · Shift+Enter for new line</span>
+                    <button type="button" class="primary ai-send" title="Send" @click="sendChat">
+                      <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true">
+                        <path d="M2 21l21-9L2 3v7l15 2-15 2v7z" />
+                      </svg>
+                    </button>
+                  </div>
+                </div>
+              </aside>
+            </div>
+          </template>
+          <template v-else>
+            <div class="tabs qtabs" :class="{ 'qtabs-saved': queriesTab === 'saved' }">
+              <button :class="{ on: queriesTab === 'saved' }" type="button" @click="queriesTab = 'saved'">Saved</button>
+              <button :class="{ on: queriesTab === 'running' }" type="button" @click="queriesTab = 'running'">Running</button>
+            </div>
+            <div
+              class="side-list full"
+              :class="{ 'is-saved-grid': queriesTab === 'saved' }"
+            >
+              <ul v-if="queriesTab === 'running'" class="list scroll list-fill">
+                <li v-for="r in runningQueries" :key="r.run_id">
+                  <code>{{ r.run_id }}</code>
+                  <pre class="snippet">{{ r.sql_snippet }}</pre>
+                </li>
+              </ul>
+              <div v-else class="saved-queries-layer scroll list-fill">
+                <p v-if="!savedQueries.length" class="saved-queries-empty">
+                  No saved queries yet. Run SQL in Chat SQL, then use Save in the header.
+                </p>
+                <div v-else class="saved-queries-grid">
+                  <article
+                    v-for="q in savedQueries"
+                    :key="q.id"
+                    class="saved-query-card"
+                    @click="pickQuery(q)"
+                  >
+                    <div class="saved-query-card-hd">
+                      <div class="saved-query-titles">
+                        <h3 class="saved-query-title">{{ q.title || 'Untitled' }}</h3>
+                        <p class="saved-query-meta">
+                          {{ savedDataSourceLabel }} · Modified {{ formatRelativeModified(q.updated_at || q.last_run_at) }}
+                        </p>
+                      </div>
+                      <div class="saved-query-menu" @click.stop>
+                        <button
+                          type="button"
+                          class="saved-query-dots"
+                          :aria-expanded="openSavedQueryMenuId === q.id"
+                          aria-label="Query actions"
+                          @click="toggleSavedQueryMenu(q.id)"
+                        >
+                          <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true">
+                            <path
+                              d="M12 5a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3zm0 8.5a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3zm0 8.5a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3z"
+                            />
+                          </svg>
+                        </button>
+                        <div v-if="openSavedQueryMenuId === q.id" class="saved-query-menu-dd" role="menu">
+                          <button type="button" role="menuitem" @click.stop="deleteSavedQueryItem(q)">Delete</button>
+                        </div>
+                      </div>
+                    </div>
+                    <div
+                      class="saved-query-code mono"
+                      v-html="highlightSqlToHtml(sqlSnippetForCard(q.sql))"
+                    />
+                    <div class="saved-query-foot">
+                      <div class="saved-query-tags">
+                        <span v-for="tag in savedQueryPills(q)" :key="tag" class="saved-tag">{{ tag }}</span>
+                      </div>
+                      <button
+                        type="button"
+                        class="saved-query-run"
+                        title="Run in workbench"
+                        aria-label="Run query"
+                        @click.stop="runSavedFromCard(q)"
+                      >
+                        <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" aria-hidden="true">
+                          <path d="M8 5v14l11-7z" />
+                        </svg>
+                      </button>
+                    </div>
+                  </article>
+                </div>
+              </div>
+            </div>
+          </template>
+        </div>
       </div>
     </main>
-
-    <aside v-if="nav === 'chat' || chatPinned" class="right-rail">
-      <header>
-        <span>Chat</span>
-        <button type="button" class="link" @click="chatPinned = !chatPinned">{{ chatPinned ? 'Unpin' : 'Pin' }}</button>
-      </header>
-      <div class="chat-log scroll">
-        <div v-for="(m, i) in chatLog" :key="i" :class="['bubble', m.role]">
-          {{ m.text }}
-        </div>
-      </div>
-      <div class="chat-input">
-        <textarea
-          v-model="chatInput"
-          rows="3"
-          placeholder="Ask for a SELECT query…"
-          @keydown.enter.exact.prevent="sendChat"
-        />
-        <button type="button" class="primary" @click="sendChat">Send</button>
-      </div>
-    </aside>
 
     </div>
   </div>
@@ -1311,10 +2058,300 @@ async function submitRowUpdate() {
   background: transparent;
   color: #e6edf3;
   cursor: pointer;
+  font-size: 0.85rem;
 }
 .nav-btns button.on {
   background: #1f6feb33;
   border-color: #1f6feb;
+}
+.nav-btns button:hover:not(.on) {
+  background: #161b22;
+}
+.history-workspace {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  min-width: 0;
+  align-items: stretch;
+}
+.history-list-pane {
+  width: min(100%, 320px);
+  min-width: 220px;
+  max-width: 36%;
+  border-right: 1px solid #30363d;
+  background: #0b0e14;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.history-list-head {
+  padding: 0.75rem 0.9rem 0.55rem;
+  border-bottom: 1px solid #21262d;
+  flex-shrink: 0;
+}
+.history-list-title {
+  margin: 0 0 0.5rem;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #e6edf3;
+  letter-spacing: -0.02em;
+}
+.history-search {
+  width: 100%;
+  font-size: 0.8rem;
+  padding: 0.4rem 0.5rem;
+  border-radius: 6px;
+  border: 1px solid #30363d;
+  background: #0d1117;
+  color: #e6edf3;
+}
+.history-groups {
+  flex: 1;
+  min-height: 0;
+  padding: 0.4rem 0.45rem 0.75rem;
+}
+.history-groups.scroll {
+  max-height: none;
+}
+.history-empty {
+  margin: 0.75rem 0.5rem;
+  line-height: 1.4;
+}
+.history-group {
+  margin-top: 0.5rem;
+}
+.history-group-label {
+  font-size: 0.62rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: #6e7681;
+  padding: 0.3rem 0.4rem 0.35rem;
+}
+.history-items {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.history-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 0.45rem 0.5rem 0.5rem 0.55rem;
+  margin-bottom: 0.15rem;
+  cursor: pointer;
+  color: #e6edf3;
+  position: relative;
+  transition: background 0.12s ease;
+}
+.history-item strong {
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+.history-item.is-active {
+  background: #161b22;
+  border-color: #30363d;
+  box-shadow: inset 3px 0 0 #1f6feb;
+}
+.history-item:hover:not(.is-active) {
+  background: #161b22aa;
+  border-color: #21262d;
+}
+.history-item-title {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 0.4rem;
+}
+.history-item-time {
+  flex-shrink: 0;
+  font-size: 0.7rem;
+  color: #6e7681;
+}
+.history-item-snippet {
+  margin: 0.25rem 0 0;
+  font-size: 0.72rem;
+  color: #8b949e;
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.history-tag {
+  display: inline-block;
+  margin-top: 0.4rem;
+  font-size: 0.6rem;
+  font-weight: 600;
+  text-transform: lowercase;
+  padding: 0.12rem 0.4rem;
+  border-radius: 4px;
+  background: #23863622;
+  color: #3fb950;
+  border: 1px solid #2ea04355;
+  letter-spacing: 0.02em;
+}
+.history-detail-pane {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: #0d1117;
+  padding: 0.6rem 1rem 0;
+  min-height: 0;
+  overflow: auto;
+}
+.history-detail-top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.5rem 1rem;
+  margin-bottom: 0.75rem;
+  padding-bottom: 0.65rem;
+  border-bottom: 1px solid #30363d;
+}
+.history-detail-h1 {
+  margin: 0 0 0.25rem;
+  font-size: 1.05rem;
+  font-weight: 600;
+  line-height: 1.2;
+  color: #e6edf3;
+}
+.history-detail-meta {
+  margin: 0;
+  font-size: 0.78rem;
+}
+.history-detail-sep {
+  margin: 0 0.35rem;
+  color: #484f58;
+}
+.history-detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+}
+.history-action-btn {
+  font-size: 0.78rem;
+  padding: 0.3rem 0.65rem;
+}
+.history-trash {
+  padding: 0.3rem 0.45rem;
+  color: #8b949e;
+}
+.history-trash:hover {
+  color: #f85149;
+  border-color: #f8514955;
+}
+.history-prompt {
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  background: #0b0e14;
+  padding: 0.5rem 0.75rem 0.6rem;
+  margin-bottom: 0.85rem;
+}
+.history-prompt-label {
+  display: block;
+  font-size: 0.62rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #6e7681;
+  margin-bottom: 0.35rem;
+}
+.history-prompt-text {
+  margin: 0;
+  font-size: 0.85rem;
+  line-height: 1.45;
+  color: #c9d1d9;
+}
+.history-sql-block {
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #161b22;
+  margin-bottom: 0.75rem;
+}
+.history-sql-head {
+  padding: 0.35rem 0.6rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #8b949e;
+  border-bottom: 1px solid #21262d;
+  background: #0b0e14;
+}
+.history-sql-body {
+  margin: 0;
+  padding: 0.6rem 0.75rem 0.75rem;
+  font-size: 0.8rem;
+  line-height: 1.5;
+  color: #79c0ff;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: min(50vh, 400px);
+  overflow: auto;
+  background: #0d1117;
+}
+.history-exec-hint {
+  display: inline-block;
+  font-size: 0.78rem;
+  color: #58a6ff;
+  text-decoration: none;
+  margin-bottom: 0.75rem;
+  cursor: pointer;
+}
+.history-exec-hint:hover {
+  text-decoration: underline;
+}
+.history-historical-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-top: auto;
+  padding: 0.5rem 0;
+  border-top: 1px solid #21262d;
+  font-size: 0.75rem;
+  color: #8b949e;
+  position: sticky;
+  bottom: 0;
+  background: linear-gradient(180deg, transparent, #0d1117 20%);
+  padding-top: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+.history-historical-note {
+  flex: 1;
+  min-width: 8rem;
+}
+.history-fork {
+  font-size: 0.75rem;
+  padding: 0.4rem 0.9rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.history-detail-placeholder {
+  margin: 2rem 1rem;
+  text-align: center;
+  font-size: 0.9rem;
+}
+@media (max-width: 900px) {
+  .history-workspace {
+    flex-direction: column;
+  }
+  .history-list-pane {
+    width: 100%;
+    max-width: none;
+    min-height: 200px;
+    border-right: none;
+    border-bottom: 1px solid #30363d;
+  }
 }
 .tables-topbar {
   display: flex;
@@ -1404,6 +2441,393 @@ async function submitRowUpdate() {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 0;
+}
+.queries-workspace {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.queries-panel-inner {
+  min-height: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+.chatsql-split {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  min-width: 0;
+  align-items: stretch;
+}
+.chatsql-main {
+  flex: 1 1 62%;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: #0b0e14;
+  border-right: 1px solid #30363d;
+}
+.sql-workbench-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+}
+.sql-editor-foot {
+  flex-shrink: 0;
+  margin-top: 0.5rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid #21262d;
+}
+.run-query-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.4rem 0.9rem;
+}
+.sql-btn-icon {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+.sql-btn-label {
+  font-size: 0.8rem;
+}
+.sql-btn-compact {
+  font-size: 0.75rem;
+  padding: 0.3rem 0.5rem;
+}
+.sql-editor-split {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.sql-editor-pane {
+  flex: 1 1 48%;
+  min-height: 140px;
+  padding: 0.65rem 0.9rem 0.5rem;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.sql-gutter-wrap {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  min-width: 0;
+  border-radius: 8px;
+  border: 1px solid #30363d;
+  background: #161b22;
+  overflow: hidden;
+}
+.sql-gutter {
+  flex-shrink: 0;
+  width: 2.5rem;
+  padding: 0.5rem 0.4rem 0.5rem 0.5rem;
+  overflow: hidden;
+  text-align: right;
+  color: #6e7681;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  user-select: none;
+  background: #0b0e14;
+  border-right: 1px solid #21262d;
+}
+.sql-gutter-line {
+  min-height: 1.5em;
+}
+.sql-input {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  resize: none;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  padding: 0.5rem 0.55rem;
+  background: #161b22;
+  color: #e6edf3;
+  white-space: pre;
+  overflow: auto;
+  tab-size: 2;
+}
+.sql-input:focus {
+  outline: none;
+  box-shadow: inset 0 0 0 1px #58a6ff;
+}
+.sql-results-stack {
+  flex: 1 1 45%;
+  min-height: 160px;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  border-top: 1px solid #30363d;
+  background: #0b0e14;
+}
+.sql-results-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem 0.75rem;
+  padding: 0.45rem 0.9rem;
+  border-bottom: 1px solid #21262d;
+  background: #0b0e14;
+}
+.sql-results-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.4rem 0.75rem;
+  min-width: 0;
+}
+.sql-results-heading {
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #8b949e;
+}
+.sql-results-meta {
+  font-size: 0.78rem;
+}
+.sql-results-tools {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+.results-filter-input {
+  width: 8rem;
+  min-width: 0;
+  padding: 0.2rem 0.4rem;
+  font-size: 0.75rem;
+  border-radius: 4px;
+  border: 1px solid #30363d;
+  background: #161b22;
+  color: #e6edf3;
+}
+.sql-results-error {
+  margin: 0.4rem 0.9rem 0;
+}
+.sql-results-body {
+  flex: 1;
+  min-height: 0;
+  max-height: none;
+  padding: 0.35rem 0.5rem 0.6rem 0.9rem;
+  overflow: auto;
+}
+.sql-results-body.scroll {
+  max-height: none;
+}
+.sql-results-placeholder {
+  padding: 1rem 0.9rem;
+}
+.icon-only {
+  padding: 0.3rem 0.45rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.icon-only:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.grid-striped tbody tr:nth-child(odd) {
+  background: rgba(22, 27, 34, 0.55);
+}
+.grid-striped tbody tr:nth-child(even) {
+  background: rgba(13, 17, 23, 0.65);
+}
+.ai-panel {
+  flex: 0 0 340px;
+  width: 340px;
+  max-width: 42%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: #0d1117;
+  color: #e6edf3;
+}
+@media (max-width: 1024px) {
+  .chatsql-split {
+    flex-direction: column;
+  }
+  .ai-panel {
+    flex: 0 0 auto;
+    width: 100%;
+    max-width: none;
+    min-height: 240px;
+    border-left: none;
+    border-top: 1px solid #30363d;
+  }
+  .chatsql-main {
+    border-right: none;
+  }
+}
+.ai-panel-header {
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid #30363d;
+  background: #010409;
+}
+.ai-panel-title {
+  font-size: 0.85rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+.ai-messages {
+  flex: 1;
+  min-height: 0;
+  padding: 0.5rem 0.6rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+.ai-messages.scroll {
+  max-height: none;
+}
+.ai-empty {
+  margin: 0.25rem 0;
+  line-height: 1.4;
+}
+.ai-msg {
+  display: flex;
+  width: 100%;
+}
+.ai-msg-user {
+  justify-content: flex-end;
+}
+.ai-msg-assistant {
+  justify-content: flex-start;
+}
+.ai-bubble {
+  max-width: 100%;
+  border-radius: 10px;
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+.ai-bubble-user {
+  background: #21262d;
+  border: 1px solid #30363d;
+  padding: 0.5rem 0.65rem;
+  color: #e6edf3;
+}
+.ai-bubble-assistant {
+  background: #0b0e14;
+  border: 1px solid #30363d;
+  padding: 0.5rem 0.6rem 0.55rem;
+  width: 100%;
+}
+.ai-assist-text {
+  margin: 0 0 0.4rem;
+  color: #c9d1d9;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.ai-sql-block {
+  margin: 0 0 0.5rem;
+  padding: 0.45rem 0.5rem;
+  border-radius: 6px;
+  background: #161b22;
+  border: 1px solid #30363d;
+  color: #79c0ff;
+  font-size: 0.75rem;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 12rem;
+  overflow: auto;
+}
+.ai-assist-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem 0.75rem;
+}
+.apply-sql-btn {
+  border: none;
+  border-radius: 6px;
+  padding: 0.3rem 0.65rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  background: #1f6feb;
+  color: #fff;
+}
+.apply-sql-btn:hover {
+  background: #388bfd;
+}
+.linkish-btn {
+  border: none;
+  background: none;
+  padding: 0.25rem 0;
+  font-size: 0.78rem;
+  color: #58a6ff;
+  cursor: pointer;
+  text-decoration: none;
+}
+.linkish-btn:hover {
+  text-decoration: underline;
+}
+.ai-composer {
+  flex-shrink: 0;
+  border-top: 1px solid #30363d;
+  background: #010409;
+  padding: 0.5rem 0.6rem 0.6rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.ai-composer-input {
+  width: 100%;
+  min-height: 3.2rem;
+  max-height: 8rem;
+  resize: vertical;
+  font-size: 0.8rem;
+  line-height: 1.4;
+  font-family: inherit;
+  background: #161b22;
+  color: #e6edf3;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  padding: 0.45rem 0.5rem;
+}
+.ai-composer-input:focus {
+  outline: none;
+  border-color: #58a6ff;
+  box-shadow: 0 0 0 1px #58a6ff40;
+}
+.ai-composer-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.tiny {
+  font-size: 0.7rem;
+}
+.ai-send {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.2rem;
+  height: 2.2rem;
+  padding: 0;
+  border-radius: 8px;
+}
+.explain-body {
+  max-height: min(50vh, 400px);
+  margin: 0.25rem 0 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 select,
 input.search {
@@ -1539,41 +2963,240 @@ h3 {
 .qtabs {
   padding: 0.5rem 1rem 0;
 }
-.editor-block {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  padding: 0.5rem 1rem;
-  min-height: 0;
-}
-.sql {
-  flex: 1;
-  min-height: 140px;
-  font-family: ui-monospace, monospace;
-  font-size: 0.85rem;
-  background: #161b22;
-  color: #e6edf3;
-  border: 1px solid #30363d;
-  border-radius: 8px;
-  padding: 0.5rem;
-}
-.actions {
-  display: flex;
-  gap: 0.5rem;
-  margin: 0.5rem 0;
+.qtabs-saved {
+  background: #0b121e;
+  border-bottom: 1px solid #1e2836;
+  padding-bottom: 0.5rem;
 }
 .error {
   color: #f85149;
   margin: 0.25rem 0;
 }
-.result {
-  border: 1px solid #30363d;
-  border-radius: 8px;
-}
 .side-list {
   height: 200px;
   border-top: 1px solid #30363d;
   padding: 0.5rem;
+}
+.side-list.full {
+  flex: 1;
+  height: auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid #30363d;
+}
+.list-fill {
+  flex: 1;
+  min-height: 0;
+  max-height: none;
+}
+.is-saved-grid.side-list {
+  background: #0b121e;
+  border-top: 1px solid #1e2836;
+  padding: 0;
+}
+.saved-queries-layer {
+  padding: 1rem 1rem 1.25rem;
+  min-height: 0;
+  flex: 1;
+  display: block;
+  background: #0b121e;
+}
+.saved-queries-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 1rem;
+  align-content: start;
+}
+.saved-queries-empty {
+  margin: 2rem 1.5rem;
+  color: #94a3b8;
+  font-size: 0.875rem;
+  line-height: 1.4;
+  text-align: center;
+  max-width: 22rem;
+  margin-left: auto;
+  margin-right: auto;
+}
+.saved-query-card {
+  position: relative;
+  background: #161f2e;
+  border-radius: 12px;
+  border: 1px solid #1e293b;
+  padding: 1rem 0.9rem 0.75rem;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  cursor: pointer;
+  transition:
+    border-color 0.15s ease,
+    box-shadow 0.15s ease;
+  text-align: left;
+}
+.saved-query-card:hover {
+  border-color: #334155;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.3);
+}
+.saved-query-card-hd {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.4rem;
+  margin-bottom: 0.6rem;
+}
+.saved-query-titles {
+  min-width: 0;
+  flex: 1;
+}
+.saved-query-title {
+  margin: 0;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: #ffffff;
+  line-height: 1.3;
+  letter-spacing: -0.01em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.saved-query-meta {
+  margin: 0.2rem 0 0;
+  font-size: 0.72rem;
+  color: #94a3b8;
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.saved-query-menu {
+  position: relative;
+  flex-shrink: 0;
+  margin: -0.2rem 0 0 0;
+}
+.saved-query-dots {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.9rem;
+  height: 1.9rem;
+  padding: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #94a3b8;
+  cursor: pointer;
+  border: 1px solid transparent;
+}
+.saved-query-dots:hover {
+  color: #e2e8f0;
+  background: #1e293b;
+  border-color: #334155;
+}
+.saved-query-menu-dd {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  z-index: 20;
+  margin-top: 4px;
+  min-width: 7rem;
+  padding: 0.3rem 0;
+  border-radius: 8px;
+  border: 1px solid #1e293b;
+  background: #0f172a;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+.saved-query-menu-dd button {
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 0.4rem 0.75rem;
+  border: none;
+  text-align: left;
+  background: none;
+  color: #e2e8f0;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+.saved-query-menu-dd button:hover {
+  background: #1e293b;
+  color: #f87171;
+}
+.saved-query-code {
+  font-size: 0.7rem;
+  line-height: 1.5;
+  margin: 0 0 0.65rem;
+  padding: 0.5rem 0.55rem;
+  border-radius: 8px;
+  background: #0b121e;
+  border: 1px solid #1e293b;
+  color: #cbd5e1;
+  min-height: 2.4rem;
+  max-height: 4.35rem;
+  overflow: hidden;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.saved-query-code :deep(.sql-hl-kw) {
+  color: #38bdf8;
+  font-weight: 500;
+}
+.saved-query-code :deep(.sql-hl-id) {
+  color: #2dd4bf;
+}
+.saved-query-code :deep(.sql-hl-str) {
+  color: #86efac;
+}
+.saved-query-code :deep(.sql-hl-num) {
+  color: #fcd34d;
+}
+.saved-query-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-top: auto;
+  padding-top: 0.1rem;
+}
+.saved-query-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  min-width: 0;
+}
+.saved-tag {
+  display: inline-block;
+  font-size: 0.65rem;
+  font-weight: 500;
+  line-height: 1.2;
+  padding: 0.15rem 0.5rem;
+  border-radius: 9999px;
+  background: #1e293b;
+  color: #94a3b8;
+}
+.saved-query-run {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.1rem;
+  height: 2.1rem;
+  margin: 0 0 0 auto;
+  padding: 0;
+  flex-shrink: 0;
+  border: none;
+  border-radius: 8px;
+  background: rgba(56, 189, 248, 0.12);
+  color: #38bdf8;
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+.saved-query-run:hover {
+  background: rgba(56, 189, 248, 0.2);
+  color: #7dd3fc;
+}
+.saved-query-run:focus-visible {
+  outline: 2px solid #38bdf8;
+  outline-offset: 2px;
 }
 .snippet {
   margin: 0.15rem 0 0;
@@ -1602,57 +3225,6 @@ h3 {
   border: 1px solid #30363d;
   background: #0d1117;
   color: #e6edf3;
-}
-.right-rail {
-  width: 320px;
-  border-left: 1px solid #30363d;
-  display: flex;
-  flex-direction: column;
-  background: #010409;
-}
-.right-rail header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 0.5rem 0.75rem;
-  border-bottom: 1px solid #30363d;
-  font-weight: 600;
-}
-.chat-log {
-  flex: 1;
-  padding: 0.5rem;
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-}
-.bubble {
-  padding: 0.5rem;
-  border-radius: 8px;
-  font-size: 0.85rem;
-  white-space: pre-wrap;
-}
-.bubble.user {
-  background: #1f6feb33;
-  align-self: flex-end;
-}
-.bubble.assistant {
-  background: #21262d;
-  align-self: flex-start;
-}
-.chat-input {
-  padding: 0.5rem;
-  border-top: 1px solid #30363d;
-  display: flex;
-  flex-direction: column;
-  gap: 0.35rem;
-}
-.chat-input textarea {
-  resize: vertical;
-  background: #161b22;
-  color: #e6edf3;
-  border: 1px solid #30363d;
-  border-radius: 6px;
-  padding: 0.35rem;
 }
 .hint {
   padding: 1rem;
