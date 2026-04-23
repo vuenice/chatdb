@@ -48,6 +48,19 @@ func Bootstrap(ctx context.Context, db *sql.DB) error {
 			)
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS db_connections_one_per_user ON db_connections(user_id)`,
+		`CREATE TABLE IF NOT EXISTS saved_queries (
+			id              INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			connection_id   INTEGER NOT NULL REFERENCES db_connections(id) ON DELETE CASCADE,
+			title           TEXT    NOT NULL DEFAULT '',
+			sql             TEXT    NOT NULL DEFAULT '',
+			is_saved        INTEGER NOT NULL DEFAULT 0,
+			last_run_at     DATETIME,
+			created_at      DATETIME NOT NULL DEFAULT (datetime('now')),
+			updated_at      DATETIME NOT NULL DEFAULT (datetime('now'))
+		)`,
+		`CREATE INDEX IF NOT EXISTS saved_queries_list_idx ON saved_queries(
+			user_id, connection_id, is_saved, last_run_at DESC, updated_at DESC)`,
 	}
 	for _, s := range stmts {
 		if _, err := db.ExecContext(ctx, s); err != nil {

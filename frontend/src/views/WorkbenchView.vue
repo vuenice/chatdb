@@ -8,7 +8,7 @@ const router = useRouter()
 const auth = useAuthStore()
 
 type Nav = 'tables' | 'queries' | 'users' | 'history'
-type QueriesTab = 'chatsql' | 'saved' | 'running'
+type QueriesTab = 'chatsql' | 'saved' | 'recent'
 type TableTab = 'structure' | 'data' | 'indexes'
 
 interface Connection {
@@ -66,11 +66,34 @@ const savedQueries = ref<
   { id: number; title: string; sql: string; is_saved: boolean; last_run_at?: string; updated_at?: string }[]
 >([])
 const openSavedQueryMenuId = ref<number | null>(null)
+const openRecentQueryMenuId = ref<number | null>(null)
 /** Recent runs + saved, for the History (Conversations) panel */
 const queryHistory = ref<typeof savedQueries.value>([])
 const historySearch = ref('')
 const selectedHistoryId = ref<number | null>(null)
-const runningQueries = ref<{ run_id: string; sql_snippet: string; started: string }[]>([])
+/** Persisted runs from SQLite (Queries → Recent) */
+const recentQueries = ref<typeof savedQueries.value>([])
+const recentOnlyUpdate = ref(false)
+
+function mapApiQueryRow(r: Record<string, unknown>): (typeof savedQueries.value)[0] {
+  return {
+    id: Number(r.id),
+    title: (r.title as string) ?? '',
+    sql: (r.sql as string) ?? '',
+    is_saved: Boolean(r.is_saved),
+    last_run_at: (r.last_run_at as string | undefined) ?? (r.LastRunAt as string | undefined),
+    updated_at: (r.updated_at as string | undefined) ?? (r.UpdatedAt as string | undefined),
+  }
+}
+
+async function fetchSavedQueriesList() {
+  if (!selectedConnId.value) return
+  const { data } = await http.get<{ queries: Record<string, unknown>[] }>(
+    `/api/connections/${selectedConnId.value}/queries`,
+    { params: { ...dbParams(), saved: '1' } },
+  )
+  savedQueries.value = (data.queries || []).map((r) => mapApiQueryRow(r))
+}
 
 const chatInput = ref('')
 const chatLog = ref<
@@ -375,6 +398,12 @@ function savedQueryPills(q: { sql: string }): string[] {
   return a.slice(0, 2)
 }
 
+function recentQueryPills(q: { sql: string }): string[] {
+  const k = queryKindTag(q.sql)
+  const a: string[] = [k ? k[0]!.toUpperCase() + k.slice(1) : 'Query', 'Recent']
+  return a.slice(0, 2)
+}
+
 function sqlSnippetForCard(sql: string, maxLines = 5, maxChars = 420): string {
   const raw = (sql || '').replace(/\r\n/g, '\n')
   if (!raw.trim()) return ''
@@ -399,12 +428,33 @@ function runSavedFromCard(q: (typeof savedQueries.value)[0]) {
   void runSql()
 }
 
+function runRecentFromCard(q: (typeof recentQueries.value)[0]) {
+  openRecentQueryMenuId.value = null
+  pickQuery(q)
+  void runSql()
+}
+
+function toggleRecentQueryMenu(id: number) {
+  openRecentQueryMenuId.value = openRecentQueryMenuId.value === id ? null : id
+}
+
+async function deleteRecentQueryItem(q: (typeof recentQueries.value)[0]) {
+  if (!selectedConnId.value) return
+  try {
+    await http.delete(`/api/connections/${selectedConnId.value}/queries/${q.id}`, { params: dbParams() })
+    openRecentQueryMenuId.value = null
+    await loadQueries()
+  } catch {
+    /* */
+  }
+}
+
 async function deleteSavedQueryItem(q: (typeof savedQueries.value)[0]) {
   if (!selectedConnId.value) return
   try {
     await http.delete(`/api/connections/${selectedConnId.value}/queries/${q.id}`, { params: dbParams() })
     openSavedQueryMenuId.value = null
-    await loadQueries()
+    await fetchSavedQueriesList()
   } catch {
     /* */
   }
@@ -551,40 +601,33 @@ async function createCatalogUser() {
 async function loadQueries() {
   if (!selectedConnId.value) return
   if (queriesTab.value === 'chatsql') return
-  if (queriesTab.value === 'running') {
-    const { data } = await http.get<{ runs: typeof runningQueries.value }>(
-      `/api/connections/${selectedConnId.value}/queries/running`,
-      { params: dbParams() },
+  if (queriesTab.value === 'recent') {
+    const params: Record<string, string> = { ...dbParams() }
+    if (recentOnlyUpdate.value) params.only_update = '1'
+    const { data } = await http.get<{ queries: Record<string, unknown>[] }>(
+      `/api/connections/${selectedConnId.value}/queries/recent`,
+      { params },
     )
-    runningQueries.value = data.runs
+    recentQueries.value = (data.queries || []).map((r) => mapApiQueryRow(r))
     return
   }
   const saved = queriesTab.value === 'saved'
   const qparams: Record<string, string> = { ...dbParams() }
   if (saved) qparams.saved = '1'
-  const { data } = await http.get<{
-    queries: (typeof savedQueries.value[0] & {
-      LastRunAt?: string
-      UpdatedAt?: string
-    })[]
-  }>(`/api/connections/${selectedConnId.value}/queries`, { params: qparams })
-  savedQueries.value = (data.queries || []).map((r) => ({
-    id: r.id,
-    title: r.title,
-    sql: r.sql,
-    is_saved: r.is_saved,
-    last_run_at: r.last_run_at ?? (r as { LastRunAt?: string }).LastRunAt,
-    updated_at: r.updated_at ?? (r as { UpdatedAt?: string }).UpdatedAt,
-  }))
+  const { data } = await http.get<{ queries: Record<string, unknown>[] }>(
+    `/api/connections/${selectedConnId.value}/queries`,
+    { params: qparams },
+  )
+  savedQueries.value = (data.queries || []).map((r) => mapApiQueryRow(r))
 }
 
 async function loadQueryHistory() {
   if (!selectedConnId.value) return
-  const { data } = await http.get<{ queries: typeof queryHistory.value }>(
+  const { data } = await http.get<{ queries: Record<string, unknown>[] }>(
     `/api/connections/${selectedConnId.value}/queries`,
     { params: { ...dbParams() } },
   )
-  queryHistory.value = data.queries
+  queryHistory.value = (data.queries || []).map((r) => mapApiQueryRow(r))
   if (queryHistory.value.length) {
     const stillThere = queryHistory.value.some((q) => q.id === selectedHistoryId.value)
     if (selectedHistoryId.value == null || !stillThere) {
@@ -619,6 +662,7 @@ async function runSql() {
       { sql: sqlText.value },
       { params: dbParams() },
     )
+    if (queriesTab.value === 'recent') await loadQueries()
   } catch (e: unknown) {
     const err = e as { response?: { data?: { error?: string } } }
     execError.value = err.response?.data?.error || 'Execute failed'
@@ -730,12 +774,18 @@ function downloadResultsCsv() {
 
 async function saveCurrentQuery() {
   if (!selectedConnId.value) return
-  await http.post(
-    `/api/connections/${selectedConnId.value}/queries`,
-    { title: 'Saved query', sql: sqlText.value, is_saved: true },
-    { params: dbParams() },
-  )
-  await loadQueries()
+  const title = (queryFileName.value || 'untitled').replace(/\.sql$/i, '').trim() || 'Saved query'
+  try {
+    await http.post(
+      `/api/connections/${selectedConnId.value}/queries`,
+      { title, sql: sqlText.value, is_saved: true },
+      { params: dbParams() },
+    )
+    await fetchSavedQueriesList()
+    if (nav.value === 'history') await loadQueryHistory()
+  } catch {
+    /* could surface a toast */
+  }
 }
 
 function openTable(t: TableMeta) {
@@ -766,6 +816,10 @@ watch(selectedConnId, async () => {
 
 watch([selectedConnId, queriesTab], () => {
   void loadQueries()
+})
+
+watch(recentOnlyUpdate, () => {
+  if (queriesTab.value === 'recent' && selectedConnId.value) void loadQueries()
 })
 
 watch([selectedConnId, selectedSchema], () => {
@@ -872,6 +926,9 @@ function onGlobalPointerDown(ev: PointerEvent) {
   }
   if (openSavedQueryMenuId.value !== null && t instanceof Element && !t.closest('.saved-query-menu')) {
     openSavedQueryMenuId.value = null
+  }
+  if (openRecentQueryMenuId.value !== null && t instanceof Element && !t.closest('.recent-query-menu')) {
+    openRecentQueryMenuId.value = null
   }
 }
 
@@ -1701,20 +1758,82 @@ async function submitRowUpdate() {
             </div>
           </template>
           <template v-else>
-            <div class="tabs qtabs" :class="{ 'qtabs-saved': queriesTab === 'saved' }">
+            <div class="tabs qtabs" :class="{ 'qtabs-saved': queriesTab === 'saved' || queriesTab === 'recent' }">
               <button :class="{ on: queriesTab === 'saved' }" type="button" @click="queriesTab = 'saved'">Saved</button>
-              <button :class="{ on: queriesTab === 'running' }" type="button" @click="queriesTab = 'running'">Running</button>
+              <button :class="{ on: queriesTab === 'recent' }" type="button" @click="queriesTab = 'recent'">Recent</button>
+            </div>
+            <div v-if="queriesTab === 'recent'" class="recent-toolbar">
+              <label class="recent-only-check">
+                <input v-model="recentOnlyUpdate" type="checkbox" />
+                Only update
+              </label>
+              <span class="muted small">UPDATE or ALTER</span>
             </div>
             <div
               class="side-list full"
-              :class="{ 'is-saved-grid': queriesTab === 'saved' }"
+              :class="{ 'is-saved-grid': queriesTab === 'saved' || queriesTab === 'recent' }"
             >
-              <ul v-if="queriesTab === 'running'" class="list scroll list-fill">
-                <li v-for="r in runningQueries" :key="r.run_id">
-                  <code>{{ r.run_id }}</code>
-                  <pre class="snippet">{{ r.sql_snippet }}</pre>
-                </li>
-              </ul>
+              <div v-if="queriesTab === 'recent'" class="saved-queries-layer scroll list-fill">
+                <p v-if="!recentQueries.length" class="saved-queries-empty">
+                  <template v-if="recentOnlyUpdate">No UPDATE/ALTER runs match. Uncheck the filter or run a query in Chat SQL.</template>
+                  <template v-else>No recent runs yet. Execute SQL in Chat SQL; each run is stored here.</template>
+                </p>
+                <div v-else class="saved-queries-grid">
+                  <article
+                    v-for="q in recentQueries"
+                    :key="q.id"
+                    class="saved-query-card"
+                    @click="pickQuery(q)"
+                  >
+                    <div class="saved-query-card-hd">
+                      <div class="saved-query-titles">
+                        <h3 class="saved-query-title">{{ (q.title || 'Untitled').trim() || 'Untitled' }}</h3>
+                        <p class="saved-query-meta">
+                          {{ savedDataSourceLabel }} · Run {{ formatRelativeModified(q.last_run_at) }}
+                        </p>
+                      </div>
+                      <div class="recent-query-menu saved-query-menu" @click.stop>
+                        <button
+                          type="button"
+                          class="saved-query-dots"
+                          :aria-expanded="openRecentQueryMenuId === q.id"
+                          aria-label="Query actions"
+                          @click="toggleRecentQueryMenu(q.id)"
+                        >
+                          <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true">
+                            <path
+                              d="M12 5a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3zm0 8.5a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3zm0 8.5a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3z"
+                            />
+                          </svg>
+                        </button>
+                        <div v-if="openRecentQueryMenuId === q.id" class="saved-query-menu-dd" role="menu">
+                          <button type="button" role="menuitem" @click.stop="deleteRecentQueryItem(q)">Delete</button>
+                        </div>
+                      </div>
+                    </div>
+                    <div
+                      class="saved-query-code mono"
+                      v-html="highlightSqlToHtml(sqlSnippetForCard(q.sql))"
+                    />
+                    <div class="saved-query-foot">
+                      <div class="saved-query-tags">
+                        <span v-for="tag in recentQueryPills(q)" :key="tag" class="saved-tag">{{ tag }}</span>
+                      </div>
+                      <button
+                        type="button"
+                        class="saved-query-run"
+                        title="Run in workbench"
+                        aria-label="Run query"
+                        @click.stop="runRecentFromCard(q)"
+                      >
+                        <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" aria-hidden="true">
+                          <path d="M8 5v14l11-7z" />
+                        </svg>
+                      </button>
+                    </div>
+                  </article>
+                </div>
+              </div>
               <div v-else class="saved-queries-layer scroll list-fill">
                 <p v-if="!savedQueries.length" class="saved-queries-empty">
                   No saved queries yet. Run SQL in Chat SQL, then use Save in the header.
@@ -2965,6 +3084,29 @@ h3 {
 }
 .tabs button.on {
   border-color: #58a6ff;
+}
+.recent-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem 0.75rem;
+  padding: 0.35rem 1rem 0.5rem;
+  border-bottom: 1px solid #1e2836;
+  background: #0b121e;
+}
+.recent-only-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.8rem;
+  color: #c9d1d9;
+  cursor: pointer;
+  user-select: none;
+}
+.recent-only-check input {
+  margin: 0;
+  cursor: pointer;
+  accent-color: #58a6ff;
 }
 .qtabs {
   padding: 0.5rem 1rem 0;
