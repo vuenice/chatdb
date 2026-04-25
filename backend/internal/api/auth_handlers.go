@@ -15,9 +15,6 @@ import (
 )
 
 type registerReq struct {
-	Email    string `json:"email"`
-	Password string `json:"password"`
-	Name     string `json:"name"`
 	// Target DB connection (required for registration)
 	ConnName       string   `json:"connection_name"`
 	Driver         string   `json:"driver"`
@@ -33,7 +30,7 @@ type registerReq struct {
 }
 
 type loginReq struct {
-	Email    string `json:"email"`
+	Username string `json:"username"`
 	Password string `json:"password"`
 }
 
@@ -43,13 +40,8 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	req.Email = strings.ToLower(strings.TrimSpace(req.Email))
-	if req.Email == "" || req.Password == "" {
-		writeErr(w, http.StatusBadRequest, errors.New("email and password required"))
-		return
-	}
-	if req.Host == "" || req.Database == "" || req.ReadUsername == "" || req.ReadPassword == "" {
-		writeErr(w, http.StatusBadRequest, errors.New("host, database, read_username, and read_password are required"))
+	if req.Host == "" || req.Database == "" || req.ReadUsername == "" {
+		writeErr(w, http.StatusBadRequest, errors.New("host, database, and read_username are required"))
 		return
 	}
 	driver := strings.ToLower(strings.TrimSpace(req.Driver))
@@ -80,8 +72,13 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if existing, err := s.Store.UserByEmail(r.Context(), req.Email); err == nil && existing != nil {
-		writeErr(w, http.StatusConflict, errors.New("email already registered"))
+	username := strings.TrimSpace(req.ReadUsername)
+	if username == "" {
+		writeErr(w, http.StatusBadRequest, errors.New("read_username is required"))
+		return
+	}
+	if existing, err := s.Store.UserByUsername(r.Context(), username); err == nil && existing != nil {
+		writeErr(w, http.StatusConflict, errors.New("username already registered"))
 		return
 	}
 
@@ -92,16 +89,30 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	hash, err := auth.HashPassword(req.Password)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err)
-		return
+	// Account credentials intentionally mirror DB credentials.
+	// If password is empty, leave password_hash NULL (login will fail until a password is set).
+	hash := ""
+	if strings.TrimSpace(req.ReadPassword) != "" {
+		var err error
+		hash, err = auth.HashPassword(req.ReadPassword)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
 	}
-	displayName := strings.TrimSpace(req.Name)
-	if displayName == "" {
-		displayName = strings.Split(req.Email, "@")[0]
+	displayName := username
+
+	// Persist DB credentials into SQLite users table (encrypted at rest).
+	dbp := ""
+	if strings.TrimSpace(req.ReadPassword) != "" {
+		enc, err := s.Crypter.Encrypt(req.ReadPassword)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		dbp = enc
 	}
-	user, err := s.Store.CreateUser(r.Context(), req.Email, hash, displayName)
+	user, err := s.Store.CreateUser(r.Context(), username, hash, displayName, req.ReadUsername, dbp)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
@@ -144,14 +155,14 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"token": tok,
-		"user":  userPayload(user.ID, user.Email, user.Name),
+		"user":  userPayload(user.ID, user.Username, user.Name),
 	})
 }
 
 // userPayload includes the role the frontend expects. v1 grants every user
 // the engineer role so both read and write pools are usable.
-func userPayload(id int64, email, name string) map[string]any {
-	return map[string]any{"id": id, "email": email, "name": name, "role": "engineer"}
+func userPayload(id int64, username, name string) map[string]any {
+	return map[string]any{"id": id, "username": username, "name": name, "role": "engineer"}
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -160,14 +171,18 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	req.Email = strings.ToLower(strings.TrimSpace(req.Email))
-	user, err := s.Store.UserByEmail(r.Context(), req.Email)
+	req.Username = strings.TrimSpace(req.Username)
+	user, err := s.Store.UserByUsername(r.Context(), req.Username)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeErr(w, http.StatusUnauthorized, errors.New("invalid credentials"))
 			return
 		}
 		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	if strings.TrimSpace(user.PasswordHash) == "" {
+		writeErr(w, http.StatusUnauthorized, errors.New("invalid credentials"))
 		return
 	}
 	if err := auth.CheckPassword(user.PasswordHash, req.Password); err != nil {
@@ -181,7 +196,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"token": tok,
-		"user":  userPayload(user.ID, user.Email, user.Name),
+		"user":  userPayload(user.ID, user.Username, user.Name),
 	})
 }
 
@@ -193,6 +208,6 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"user": userPayload(user.ID, user.Email, user.Name),
+		"user": userPayload(user.ID, user.Username, user.Name),
 	})
 }

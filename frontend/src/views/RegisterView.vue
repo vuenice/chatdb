@@ -6,14 +6,13 @@ import { useAuthStore } from '../stores/auth'
 const router = useRouter()
 const auth = useAuthStore()
 
-const name = ref('')
-const email = ref('')
-const password = ref('')
 const error = ref('')
 const loading = ref(false)
 
 const errorHint = computed(() =>
-  error.value.includes('Access denied for user')
+  error.value.includes('email and password required')
+    ? 'Please fill Host, Database, and Database username. Database password is optional.'
+    : error.value.includes('Access denied for user')
     ? 'hint: Incorrect Database username or Database password'
     : '',
 )
@@ -40,11 +39,11 @@ async function submit() {
   error.value = ''
   loading.value = true
   try {
+    if (!conn.value.host.trim() || !conn.value.database.trim() || !conn.value.db_username.trim()) {
+      error.value = 'Host, Database, and Database username are required'
+      return
+    }
     await auth.register({
-      name: name.value || email.value.split('@')[0],
-      email: email.value,
-      password: password.value,
-      role: 'engineer',
       connection_name: conn.value.connection_name || undefined,
       driver: conn.value.driver,
       host: conn.value.host,
@@ -60,7 +59,8 @@ async function submit() {
     await router.push(typeof redir === 'string' && redir ? redir : '/')
   } catch (e: unknown) {
     const err = e as { response?: { data?: { error?: string } } }
-    error.value = err.response?.data?.error || 'Request failed'
+    const msg = err.response?.data?.error || 'Request failed'
+    error.value = msg
   } finally {
     loading.value = false
   }
@@ -71,23 +71,9 @@ async function submit() {
   <div class="auth-page">
     <form class="card wide" @submit.prevent="submit">
       <h1>ChatDB</h1>
-      <p class="muted">Create your account and connect your database</p>
-      <label>
-        Name
-        <input v-model="name" type="text" autocomplete="name" />
-      </label>
-      <label>
-        Email
-        <input v-model="email" type="email" required autocomplete="username" />
-      </label>
-      <label>
-        Password
-        <input v-model="password" type="password" required autocomplete="new-password" />
-      </label>
-
-      <p class="section-title">Database connection</p>
+      <p class="muted">Connect your database</p>
       <label
-        >Connection label
+        >Connection name (optional)
         <input v-model="conn.connection_name" type="text" placeholder="e.g. production" />
       </label>
       <label
@@ -100,21 +86,29 @@ async function submit() {
       <label>Host <input v-model="conn.host" required /></label>
       <label>Port <input v-model.number="conn.port" type="number" /></label>
       <label
-        >Default database name
-        <input v-model="conn.database" required placeholder="e.g. myapp" />
+        >Database Name
+        <input v-model="conn.database" required placeholder="Default database" />
       </label>
       <label v-if="conn.driver === 'postgres'"
         >SSL mode <input v-model="conn.ssl_mode" placeholder="disable"
       /></label>
-      <label>Database username <input v-model="conn.db_username" required autocomplete="off" /></label>
+      <label
+        >Database username
+        <input v-model="conn.db_username" required autocomplete="off" placeholder="e.g. root" />
+      </label>
       <label
         >Database password
-        <input v-model="conn.db_password" type="password" required autocomplete="new-password" />
+        <input
+          v-model="conn.db_password"
+          type="password"
+          autocomplete="new-password"
+          placeholder="leave empty for no password"
+        />
       </label>
 
       <p v-if="error" class="error">{{ error }}</p>
       <p v-if="errorHint" class="error-hint">{{ errorHint }}</p>
-      <button type="submit" class="primary" :disabled="loading">{{ loading ? '…' : 'Create account' }}</button>
+      <button type="submit" class="primary" :disabled="loading">{{ loading ? '…' : 'Continue' }}</button>
       <p v-if="auth.hasUsers !== false" class="footer">
         <RouterLink to="/login">Already have an account? Sign in</RouterLink>
       </p>

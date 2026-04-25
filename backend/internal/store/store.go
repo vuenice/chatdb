@@ -4,10 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"time"
 )
 
-const localMetadataUserEmail = "__chatdb_local@internal"
+const localMetadataUsername = "__chatdb_local@internal"
 
 // Store wraps the SQLite metadata DB and exposes typed queries against the
 // `users` and `db_connections` tables.
@@ -22,16 +23,19 @@ func New(db *sql.DB) *Store {
 // User represents a registered application user.
 type User struct {
 	ID           int64
-	Email        string
-	PasswordHash string
+	Username     string
+	DbUsername   string
+	DbPassword   string // encrypted
+	PasswordHash string // may be empty if NULL in DB
 	Name         string
 	CreatedAt    time.Time
 }
 
-func (s *Store) CreateUser(ctx context.Context, email, passwordHash, name string) (*User, error) {
+func (s *Store) CreateUser(ctx context.Context, username, passwordHash, name, dbUsername, dbPasswordEnc string) (*User, error) {
 	id, err := s.insertReturningID(ctx,
-		`INSERT INTO users (email, password_hash, name) VALUES (?, ?, ?)`,
-		email, passwordHash, name,
+		`INSERT INTO users (username, db_username, db_password, password_hash, name)
+		 VALUES (?, ?, ?, ?, ?)`,
+		username, dbUsername, dbPasswordEnc, passwordHashOrNull(passwordHash), name,
 	)
 	if err != nil {
 		return nil, err
@@ -39,15 +43,24 @@ func (s *Store) CreateUser(ctx context.Context, email, passwordHash, name string
 	return s.UserByID(ctx, id)
 }
 
+func passwordHashOrNull(s string) any {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	return s
+}
+
 func (s *Store) UserByID(ctx context.Context, id int64) (*User, error) {
 	row := s.DB.QueryRowContext(ctx,
-		`SELECT id, email, password_hash, name, created_at FROM users WHERE id = ?`, id)
+		`SELECT id, username, db_username, db_password, password_hash, name, created_at
+		 FROM users WHERE id = ?`, id)
 	return scanUser(row)
 }
 
-func (s *Store) UserByEmail(ctx context.Context, email string) (*User, error) {
+func (s *Store) UserByUsername(ctx context.Context, username string) (*User, error) {
 	row := s.DB.QueryRowContext(ctx,
-		`SELECT id, email, password_hash, name, created_at FROM users WHERE email = ?`, email)
+		`SELECT id, username, db_username, db_password, password_hash, name, created_at
+		 FROM users WHERE username = ?`, username)
 	return scanUser(row)
 }
 
@@ -59,9 +72,13 @@ func (s *Store) DeleteUser(ctx context.Context, id int64) error {
 
 func scanUser(row *sql.Row) (*User, error) {
 	var u User
+	var ph sql.NullString
 	var created sql.NullTime
-	if err := row.Scan(&u.ID, &u.Email, &u.PasswordHash, &u.Name, &created); err != nil {
+	if err := row.Scan(&u.ID, &u.Username, &u.DbUsername, &u.DbPassword, &ph, &u.Name, &created); err != nil {
 		return nil, err
+	}
+	if ph.Valid {
+		u.PasswordHash = ph.String
 	}
 	if created.Valid {
 		u.CreatedAt = created.Time
@@ -72,7 +89,7 @@ func scanUser(row *sql.Row) (*User, error) {
 // CountHumanUsers returns how many real accounts exist (excludes legacy local-only rows).
 func (s *Store) CountHumanUsers(ctx context.Context) (int64, error) {
 	row := s.DB.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM users WHERE email != ?`, localMetadataUserEmail)
+		`SELECT COUNT(*) FROM users WHERE username != ?`, localMetadataUsername)
 	var n int64
 	if err := row.Scan(&n); err != nil {
 		return 0, err

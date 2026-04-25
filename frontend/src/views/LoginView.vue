@@ -7,7 +7,7 @@ const router = useRouter()
 const route = useRoute()
 const auth = useAuthStore()
 
-const email = ref('')
+const username = ref('')
 const password = ref('')
 const error = ref('')
 const loading = ref(false)
@@ -16,7 +16,7 @@ async function submit() {
   error.value = ''
   loading.value = true
   try {
-    await auth.login(email.value, password.value)
+    await auth.login(username.value, password.value)
     await auth.loadPublicHealth()
     const redir = route.query.redirect
     await router.push(typeof redir === 'string' && redir ? redir : '/')
@@ -35,8 +35,8 @@ async function submit() {
       <h1>ChatDB</h1>
       <p class="muted">PostgreSQL &amp; MySQL viewer</p>
       <label>
-        Email
-        <input v-model="email" type="email" required autocomplete="username" />
+        Username
+        <input v-model="username" type="text" required autocomplete="username" />
       </label>
       <label>
         Password

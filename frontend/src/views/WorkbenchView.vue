@@ -772,8 +772,14 @@ watch([selectedConnId, selectedSchema], () => {
   void loadTables()
 })
 
-watch(selectedPhysicalDatabase, async () => {
+watch(selectedPhysicalDatabase, async (next, prev) => {
   if (!selectedConnId.value) return
+  // When the active database changes, take the user back to Tables so the UI
+  // context matches the newly selected data source.
+  if (next !== prev) {
+    nav.value = 'tables'
+    clearSelectedTable()
+  }
   await loadTables()
   await loadCatalogRoles()
   if (nav.value === 'users') await loadLoginUsers()
@@ -1160,7 +1166,7 @@ async function submitRowUpdate() {
             :aria-expanded="accountMenuOpen"
             :aria-label="
               (accountMenuOpen ? 'Close account menu' : 'Open account menu') +
-              (auth.user?.email ? ` (${auth.user.email})` : '')
+              (auth.user?.username ? ` (${auth.user.username})` : '')
             "
             aria-haspopup="menu"
             aria-controls="account-menu-dropdown"
@@ -1205,7 +1211,7 @@ async function submitRowUpdate() {
             role="menu"
             @click.stop
           >
-            <div class="account-email">{{ auth.user?.email }}</div>
+            <div class="account-username">{{ auth.user?.username }}</div>
             <div v-if="auth.user?.role" class="account-role">{{ auth.user.role }}</div>
             <button type="button" class="dropdown-item" role="menuitem" @click="openCreateDbModal">Create new database</button>
             <button v-if="showLogout" type="button" class="dropdown-item linkish" role="menuitem" @click="logout">Log out</button>
@@ -1884,7 +1890,7 @@ async function submitRowUpdate() {
   gap: 0.35rem;
   z-index: 30;
 }
-.account-email {
+.account-username {
   font-size: 0.8rem;
   color: #e6edf3;
   word-break: break-all;

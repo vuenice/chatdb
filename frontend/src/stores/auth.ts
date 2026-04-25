@@ -7,7 +7,7 @@ export type Role = 'viewer' | 'analyst' | 'engineer'
 export interface User {
   id: number
   name: string
-  email: string
+  username: string
   role: Role
 }
 
@@ -35,18 +35,14 @@ export const useAuthStore = defineStore('auth', () => {
     else localStorage.removeItem('chatdb_user')
   }
 
-  async function login(email: string, password: string) {
-    const { data } = await http.post('/api/login', { email, password })
+  async function login(username: string, password: string) {
+    const { data } = await http.post('/api/login', { username, password })
     token.value = data.token as string
     user.value = data.user as User
     persist()
   }
 
   async function register(payload: {
-    name: string
-    email: string
-    password: string
-    role: Role
     connection_name?: string
     driver?: string
     host: string

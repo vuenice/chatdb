@@ -12,8 +12,10 @@ func Bootstrap(ctx context.Context, db *sql.DB) error {
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS users (
 			id              INTEGER PRIMARY KEY AUTOINCREMENT,
-			email           TEXT    NOT NULL UNIQUE,
-			password_hash   TEXT    NOT NULL,
+			username        TEXT    NOT NULL UNIQUE,
+			db_username     TEXT    NOT NULL DEFAULT '',
+			db_password     TEXT    NOT NULL DEFAULT '',
+			password_hash   TEXT    NULL,
 			name            TEXT    NOT NULL DEFAULT '',
 			created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
