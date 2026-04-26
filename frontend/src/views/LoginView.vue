@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, onMounted } from 'vue'
 import { useRouter, useRoute, RouterLink } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
 
@@ -7,16 +7,45 @@ const router = useRouter()
 const route = useRoute()
 const auth = useAuthStore()
 
+const labels = ref<string[]>([])
+const connectionName = ref('')
 const username = ref('')
 const password = ref('')
 const error = ref('')
 const loading = ref(false)
+const pageLoading = ref(true)
+
+onMounted(async () => {
+  error.value = ''
+  try {
+    labels.value = await auth.loadConnectionLabels()
+    if (labels.value.length === 0) {
+      const r = route.query.redirect
+      await router.replace(
+        typeof r === 'string' && r
+          ? { path: '/register', query: { redirect: r } }
+          : { path: '/register' },
+      )
+      return
+    }
+    connectionName.value = labels.value[0] ?? ''
+  } catch (e: unknown) {
+    const err = e as { response?: { data?: { error?: string } } }
+    error.value = err.response?.data?.error || 'Failed to load connection labels'
+  } finally {
+    pageLoading.value = false
+  }
+})
 
 async function submit() {
   error.value = ''
   loading.value = true
   try {
-    await auth.login(username.value, password.value)
+    if (!connectionName.value.trim()) {
+      error.value = 'Select a connection label'
+      return
+    }
+    await auth.login(connectionName.value, username.value, password.value)
     await auth.loadPublicHealth()
     const redir = route.query.redirect
     await router.push(typeof redir === 'string' && redir ? redir : '/')
@@ -31,22 +60,29 @@ async function submit() {
 
 <template>
   <div class="auth-page">
-    <form class="card" @submit.prevent="submit">
+    <p v-if="pageLoading" class="muted">Loading…</p>
+    <form v-else class="card" @submit.prevent="submit">
       <h1>ChatDB</h1>
       <p class="muted">PostgreSQL &amp; MySQL viewer</p>
+      <label>
+        Connection label
+        <select v-model="connectionName" required>
+          <option v-for="l in labels" :key="l" :value="l">{{ l }}</option>
+        </select>
+      </label>
       <label>
         Username
         <input v-model="username" type="text" required autocomplete="username" />
       </label>
       <label>
         Password
-        <input v-model="password" type="password" required autocomplete="current-password" />
+        <input v-model="password" type="password" autocomplete="current-password" />
       </label>
 
       <p v-if="error" class="error">{{ error }}</p>
-      <button type="submit" class="primary" :disabled="loading">{{ loading ? '…' : 'Login' }}</button>
+      <button type="submit" class="primary" :disabled="loading || pageLoading">{{ loading ? '…' : 'Login' }}</button>
       <p v-if="auth.hasUsers !== false" class="footer">
-        <RouterLink to="/register">Create an account</RouterLink>
+        <RouterLink to="/register">Register new connection</RouterLink>
       </p>
     </form>
   </div>
@@ -89,7 +125,8 @@ label {
   font-size: 0.85rem;
   color: #8b949e;
 }
-input {
+input,
+select {
   padding: 0.5rem 0.6rem;
   border-radius: 6px;
   border: 1px solid #30363d;

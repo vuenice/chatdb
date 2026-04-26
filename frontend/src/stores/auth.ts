@@ -35,15 +35,20 @@ export const useAuthStore = defineStore('auth', () => {
     else localStorage.removeItem('chatdb_user')
   }
 
-  async function login(username: string, password: string) {
-    const { data } = await http.post('/api/login', { username, password })
+  async function loadConnectionLabels() {
+    const { data } = await http.get<{ labels?: string[] }>('/api/connection-labels')
+    return (data.labels ?? []).filter((s) => s.trim() !== '')
+  }
+
+  async function login(connectionName: string, username: string, password: string) {
+    const { data } = await http.post('/api/login', { connection_name: connectionName, username, password })
     token.value = data.token as string
     user.value = data.user as User
     persist()
   }
 
   async function register(payload: {
-    connection_name?: string
+    connection_name: string
     driver?: string
     host: string
     port?: number
@@ -73,5 +78,16 @@ export const useAuthStore = defineStore('auth', () => {
     }
   }
 
-  return { token, user, hasUsers, isEngineer, login, register, logout, persist, loadPublicHealth }
+  return {
+    token,
+    user,
+    hasUsers,
+    isEngineer,
+    login,
+    loadConnectionLabels,
+    register,
+    logout,
+    persist,
+    loadPublicHealth,
+  }
 })

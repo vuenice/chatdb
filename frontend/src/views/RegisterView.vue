@@ -39,12 +39,16 @@ async function submit() {
   error.value = ''
   loading.value = true
   try {
+    if (!conn.value.connection_name.trim()) {
+      error.value = 'Connection label is required'
+      return
+    }
     if (!conn.value.host.trim() || !conn.value.database.trim() || !conn.value.db_username.trim()) {
       error.value = 'Host, Database, and Database username are required'
       return
     }
     await auth.register({
-      connection_name: conn.value.connection_name || undefined,
+      connection_name: conn.value.connection_name.trim(),
       driver: conn.value.driver,
       host: conn.value.host,
       port: conn.value.port,
@@ -71,10 +75,14 @@ async function submit() {
   <div class="auth-page">
     <form class="card wide" @submit.prevent="submit">
       <h1>ChatDB</h1>
-      <p class="muted">Connect your database</p>
+      <p class="muted">Register new connection</p>
+      <p class="note">
+        For the admin, login username and password are the same as the database username and password.
+        Other users are created by the admin and cannot register here.
+      </p>
       <label
-        >Connection name (optional)
-        <input v-model="conn.connection_name" type="text" placeholder="e.g. production" />
+        >Connection label
+        <input v-model="conn.connection_name" type="text" required placeholder="e.g. production" />
       </label>
       <label
         >Driver
@@ -148,6 +156,16 @@ h1 {
   margin: 0;
   color: #8b949e;
   font-size: 0.9rem;
+}
+.note {
+  margin: 0;
+  padding: 0.75rem 0.85rem;
+  border-radius: 8px;
+  border: 1px solid #30363d;
+  background: #0d1117;
+  color: #8b949e;
+  font-size: 0.8rem;
+  line-height: 1.45;
 }
 .section-title {
   margin: 0.5rem 0 0;

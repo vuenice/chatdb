@@ -139,6 +139,7 @@ func (s *Server) handleConnectionStore(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
+	_ = s.Store.UpdateUserConnectionLabel(r.Context(), uid, c.Name)
 	s.Pools.Invalidate(c.ID)
 	writeJSON(w, http.StatusOK, map[string]any{"connection": toDTO(c)})
 }
@@ -223,6 +224,7 @@ func (s *Server) handleConnectionUpdate(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
+	_ = s.Store.UpdateUserConnectionLabel(r.Context(), uid, c.Name)
 	s.Pools.Invalidate(c.ID)
 	writeJSON(w, http.StatusOK, map[string]any{"connection": toDTO(c)})
 }

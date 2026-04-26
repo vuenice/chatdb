@@ -64,6 +64,16 @@ make dev-backend    # go run ./cmd/chatdb on :3000
 make dev-frontend   # vite on :5173, proxies /api to :3000
 ```
 
+on windows
+```sh
+cd backend
+go run .\cmd\chatdb -config .\chatdb.config.json
+```
+```sh
+cd frontend
+npm run dev
+```
+
 ## Sample databases (optional)
 
 ```bash

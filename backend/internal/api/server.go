@@ -51,6 +51,7 @@ func (s *Server) Router() http.Handler {
 		r.Post("/register", s.handleRegister)
 		r.Post("/login", s.handleLogin)
 		r.Get("/health", s.handleHealth)
+		r.Get("/connection-labels", s.handleConnectionLabels)
 
 		r.Group(func(r chi.Router) {
 			r.Use(s.requireAuth)

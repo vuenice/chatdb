@@ -22,20 +22,21 @@ func New(db *sql.DB) *Store {
 
 // User represents a registered application user.
 type User struct {
-	ID           int64
-	Username     string
-	DbUsername   string
-	DbPassword   string // encrypted
-	PasswordHash string // may be empty if NULL in DB
-	Name         string
-	CreatedAt    time.Time
+	ID               int64
+	Username         string
+	ConnectionLabel  string
+	DbUsername       string
+	DbPassword       string // encrypted
+	PasswordHash     string // may be empty if NULL in DB
+	Name             string
+	CreatedAt        time.Time
 }
 
-func (s *Store) CreateUser(ctx context.Context, username, passwordHash, name, dbUsername, dbPasswordEnc string) (*User, error) {
+func (s *Store) CreateUser(ctx context.Context, username, connectionLabel, passwordHash, name, dbUsername, dbPasswordEnc string) (*User, error) {
 	id, err := s.insertReturningID(ctx,
-		`INSERT INTO users (username, db_username, db_password, password_hash, name)
-		 VALUES (?, ?, ?, ?, ?)`,
-		username, dbUsername, dbPasswordEnc, passwordHashOrNull(passwordHash), name,
+		`INSERT INTO users (username, connection_label, db_username, db_password, password_hash, name)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		username, connectionLabel, dbUsername, dbPasswordEnc, passwordHashOrNull(passwordHash), name,
 	)
 	if err != nil {
 		return nil, err
@@ -52,16 +53,47 @@ func passwordHashOrNull(s string) any {
 
 func (s *Store) UserByID(ctx context.Context, id int64) (*User, error) {
 	row := s.DB.QueryRowContext(ctx,
-		`SELECT id, username, db_username, db_password, password_hash, name, created_at
+		`SELECT id, username, connection_label, db_username, db_password, password_hash, name, created_at
 		 FROM users WHERE id = ?`, id)
 	return scanUser(row)
 }
 
-func (s *Store) UserByUsername(ctx context.Context, username string) (*User, error) {
-	row := s.DB.QueryRowContext(ctx,
-		`SELECT id, username, db_username, db_password, password_hash, name, created_at
-		 FROM users WHERE username = ?`, username)
+// UserByUsernameAndConnectionName finds a user by app username and connection label.
+func (s *Store) UserByUsernameAndConnectionName(ctx context.Context, username, connectionName string) (*User, error) {
+	row := s.DB.QueryRowContext(ctx, `
+		SELECT id, username, connection_label, db_username, db_password, password_hash, name, created_at
+		FROM users
+		WHERE username = ? AND connection_label = ?`,
+		username, connectionName)
 	return scanUser(row)
+}
+
+// UpdateUserConnectionLabel sets the label used for login; keep in sync with db_connections.name.
+func (s *Store) UpdateUserConnectionLabel(ctx context.Context, userID int64, connectionLabel string) error {
+	_, err := s.DB.ExecContext(ctx,
+		`UPDATE users SET connection_label = ? WHERE id = ?`, connectionLabel, userID)
+	return err
+}
+
+// ListConnectionNames returns distinct connection labels, sorted.
+func (s *Store) ListConnectionNames(ctx context.Context) ([]string, error) {
+	rows, err := s.DB.QueryContext(ctx,
+		`SELECT DISTINCT name FROM db_connections ORDER BY name COLLATE NOCASE`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(name) != "" {
+			out = append(out, name)
+		}
+	}
+	return out, rows.Err()
 }
 
 // DeleteUser removes a user row (used to roll back failed registration).
@@ -74,7 +106,7 @@ func scanUser(row *sql.Row) (*User, error) {
 	var u User
 	var ph sql.NullString
 	var created sql.NullTime
-	if err := row.Scan(&u.ID, &u.Username, &u.DbUsername, &u.DbPassword, &ph, &u.Name, &created); err != nil {
+	if err := row.Scan(&u.ID, &u.Username, &u.ConnectionLabel, &u.DbUsername, &u.DbPassword, &ph, &u.Name, &created); err != nil {
 		return nil, err
 	}
 	if ph.Valid {

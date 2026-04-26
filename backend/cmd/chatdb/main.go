@@ -40,6 +40,10 @@ func main() {
 		cancel()
 		log.Fatalf("bootstrap metadata: %v", err)
 	}
+	if err := migrate.Upgrade(ctx, db); err != nil {
+		cancel()
+		log.Fatalf("upgrade metadata: %v", err)
+	}
 	cancel()
 	log.Printf("metadata sqlite ready: %s", cfg.Metadata.Path)
 

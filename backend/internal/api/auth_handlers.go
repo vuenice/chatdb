@@ -30,8 +30,9 @@ type registerReq struct {
 }
 
 type loginReq struct {
-	Username string `json:"username"`
-	Password string `json:"password"`
+	ConnectionName string `json:"connection_name"`
+	Username       string `json:"username"`
+	Password       string `json:"password"`
 }
 
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
@@ -66,10 +67,8 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	connName := strings.TrimSpace(req.ConnName)
 	if connName == "" {
-		connName = strings.TrimSpace(req.Host)
-		if connName == "" {
-			connName = "default"
-		}
+		writeErr(w, http.StatusBadRequest, errors.New("connection_name is required"))
+		return
 	}
 
 	username := strings.TrimSpace(req.ReadUsername)
@@ -77,8 +76,11 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, errors.New("read_username is required"))
 		return
 	}
-	if existing, err := s.Store.UserByUsername(r.Context(), username); err == nil && existing != nil {
-		writeErr(w, http.StatusConflict, errors.New("username already registered"))
+	if _, err := s.Store.UserByUsernameAndConnectionName(r.Context(), username, connName); err == nil {
+		writeErr(w, http.StatusConflict, errors.New("username already registered for this connection label"))
+		return
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
 
@@ -112,7 +114,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		}
 		dbp = enc
 	}
-	user, err := s.Store.CreateUser(r.Context(), username, hash, displayName, req.ReadUsername, dbp)
+	user, err := s.Store.CreateUser(r.Context(), username, connName, hash, displayName, req.ReadUsername, dbp)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
@@ -165,14 +167,31 @@ func userPayload(id int64, username, name string) map[string]any {
 	return map[string]any{"id": id, "username": username, "name": name, "role": "engineer"}
 }
 
+func (s *Server) handleConnectionLabels(w http.ResponseWriter, r *http.Request) {
+	labels, err := s.Store.ListConnectionNames(r.Context())
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	if labels == nil {
+		labels = []string{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"labels": labels})
+}
+
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	var req loginReq
 	if err := decodeJSON(r, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
+	req.ConnectionName = strings.TrimSpace(req.ConnectionName)
+	if req.ConnectionName == "" {
+		writeErr(w, http.StatusBadRequest, errors.New("connection_name is required"))
+		return
+	}
 	req.Username = strings.TrimSpace(req.Username)
-	user, err := s.Store.UserByUsername(r.Context(), req.Username)
+	user, err := s.Store.UserByUsernameAndConnectionName(r.Context(), req.Username, req.ConnectionName)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeErr(w, http.StatusUnauthorized, errors.New("invalid credentials"))
@@ -182,12 +201,15 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if strings.TrimSpace(user.PasswordHash) == "" {
-		writeErr(w, http.StatusUnauthorized, errors.New("invalid credentials"))
-		return
-	}
-	if err := auth.CheckPassword(user.PasswordHash, req.Password); err != nil {
-		writeErr(w, http.StatusUnauthorized, errors.New("invalid credentials"))
-		return
+		if strings.TrimSpace(req.Password) != "" {
+			writeErr(w, http.StatusUnauthorized, errors.New("invalid credentials"))
+			return
+		}
+	} else {
+		if err := auth.CheckPassword(user.PasswordHash, req.Password); err != nil {
+			writeErr(w, http.StatusUnauthorized, errors.New("invalid credentials"))
+			return
+		}
 	}
 	tok, err := s.JWT.Issue(user.ID)
 	if err != nil {
