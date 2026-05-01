@@ -18,12 +18,12 @@ import (
 
 // Server holds all wired dependencies for HTTP handlers.
 type Server struct {
-	Cfg     *config.Config
-	Store   *store.Store
-	Crypter *security.Crypter
-	JWT     *auth.Issuer
-	Pools   *engine.Manager
-	Static  fs.FS // built SPA, may be nil during dev
+	Cfg         *config.Config
+	Store       *store.Store
+	Crypter     *security.Crypter
+	JWT         *auth.Issuer
+	Pools       *engine.Manager
+	Static fs.FS // built SPA, may be nil during dev
 }
 
 // requireAuth enforces JWT on all protected routes.
@@ -78,11 +78,11 @@ func (s *Server) Router() http.Handler {
 
 			// Deferred endpoints — return empty payloads so the UI doesn't choke.
 			r.Get("/connections/{id}/schema_graph", stub(map[string]any{"nodes": []any{}, "edges": []any{}}))
-			r.Get("/connections/{id}/queries", s.handleQueriesIndex)
-			r.Post("/connections/{id}/queries", s.handleQueriesStore)
-			r.Get("/connections/{id}/queries/recent", s.handleQueriesRecent)
-			r.Post("/connections/{id}/queries/touch_run", s.handleQueriesTouchRun)
-			r.Delete("/connections/{id}/queries/{qid}", s.handleQueriesDestroy)
+			r.Get("/connections/{id}/queries", stub(map[string]any{"queries": []any{}}))
+			r.Post("/connections/{id}/queries", stub(map[string]any{"saved": false}))
+			r.Get("/connections/{id}/queries/running", stub(map[string]any{"runs": []any{}}))
+			r.Post("/connections/{id}/queries/touch_run", stub(map[string]any{"ok": true}))
+			r.Delete("/connections/{id}/queries/{qid}", stub(map[string]any{"ok": true}))
 			r.Get("/connections/{id}/monitoring/duplicate_indexes", stub(map[string]any{"unavailable": true}))
 			r.Get("/connections/{id}/monitoring/slow_queries", stub(map[string]any{"unavailable": true}))
 			r.Post("/connections/{id}/ai/chat", stub(map[string]any{"sql": "", "error": "AI disabled in this build"}))

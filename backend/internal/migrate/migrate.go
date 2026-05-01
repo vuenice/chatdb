@@ -39,28 +39,6 @@ func Bootstrap(ctx context.Context, db *sql.DB) error {
 			created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE INDEX IF NOT EXISTS db_connections_user_id_idx ON db_connections(user_id)`,
-		// One connection per ChatDB user: remove older duplicates then enforce uniqueness.
-		`DELETE FROM db_connections WHERE id IN (
-			SELECT d1.id FROM db_connections d1
-			WHERE EXISTS (
-				SELECT 1 FROM db_connections d2
-				WHERE d2.user_id = d1.user_id AND d2.id > d1.id
-			)
-		)`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS db_connections_one_per_user ON db_connections(user_id)`,
-		`CREATE TABLE IF NOT EXISTS saved_queries (
-			id              INTEGER PRIMARY KEY AUTOINCREMENT,
-			user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-			connection_id   INTEGER NOT NULL REFERENCES db_connections(id) ON DELETE CASCADE,
-			title           TEXT    NOT NULL DEFAULT '',
-			sql             TEXT    NOT NULL DEFAULT '',
-			is_saved        INTEGER NOT NULL DEFAULT 0,
-			last_run_at     DATETIME,
-			created_at      DATETIME NOT NULL DEFAULT (datetime('now')),
-			updated_at      DATETIME NOT NULL DEFAULT (datetime('now'))
-		)`,
-		`CREATE INDEX IF NOT EXISTS saved_queries_list_idx ON saved_queries(
-			user_id, connection_id, is_saved, last_run_at DESC, updated_at DESC)`,
 	}
 	for _, s := range stmts {
 		if _, err := db.ExecContext(ctx, s); err != nil {
