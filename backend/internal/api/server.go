@@ -63,6 +63,12 @@ func (s *Server) Router() http.Handler {
 			r.Put("/connections/{id}", s.handleConnectionUpdate)
 			r.Delete("/connections/{id}", s.handleConnectionDestroy)
 
+r.Post("/connections/{id}/truncate", s.handleTruncateDatabase)
+		r.Post("/connections/{id}/delete", s.handleDeleteDatabase)
+		r.Post("/connections/{id}/rename", s.handleRenameDatabase)
+		r.Post("/connections/{id}/import", s.handleImportSQL)
+		r.Get("/connections/{id}/export", s.handleExportSQL)
+
 			r.Get("/connections/{id}/databases", s.handleListDatabases)
 			r.Get("/connections/{id}/catalog/roles", s.handleCatalogRoles)
 			r.Get("/connections/{id}/catalog/login_users", s.handleCatalogLoginUsers)

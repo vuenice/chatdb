@@ -7,7 +7,7 @@ import { useAuthStore } from '../stores/auth'
 const router = useRouter()
 const auth = useAuthStore()
 
-type Nav = 'tables' | 'queries' | 'users' | 'history'
+type Nav = 'tables' | 'queries' | 'users' | 'history' | 'operations'
 type QueriesTab = 'chatsql' | 'saved' | 'running'
 type TableTab = 'structure' | 'data' | 'indexes'
 
@@ -456,9 +456,102 @@ async function loadDatabases() {
   if (!selectedConnId.value) return
   const { data } = await http.get<{ databases: string[] }>(
     `/api/connections/${selectedConnId.value}/databases`,
-    { params: dbParams() },
+    { params: dbParams() }
   )
   databases.value = data.databases
+}
+
+// Operations functions
+const sqlFileInput = ref<HTMLInputElement | null>(null)
+
+const confirmDeleteDB = async () => {
+  if (!selectedConnId.value) return
+  const confirmed = window.confirm(
+    'Are you sure you want to delete this database? This cannot be undone!'
+  )
+  if (confirmed) {
+    try {
+      await http.post(`/api/connections/${selectedConnId.value}/delete`)
+      alert('Database deleted successfully')
+      await loadConnections()
+    } catch (e: any) {
+      alert('Failed to delete database: ' + e.message)
+    }
+  }
+}
+
+const triggerRenameDB = () => {
+  const newName = window.prompt('Enter new database name:')
+  if (newName && selectedConnId.value) {
+    renameDatabase(newName)
+  }
+}
+
+const renameDatabase = async (newName: string) => {
+  if (!selectedConnId.value) return
+  try {
+    await http.post(`/api/connections/${selectedConnId.value}/rename`, { new_name: newName })
+    alert('Database renamed successfully')
+    await loadConnections()
+  } catch (e: any) {
+    alert('Failed to rename database: ' + e.message)
+  }
+}
+
+const confirmTruncateDB = async () => {
+  if (!selectedConnId.value) return
+  const confirmed = window.confirm(
+    'Are you sure you want to truncate all tables? This cannot be undone!'
+  )
+  if (confirmed) {
+    try {
+      await http.post(`/api/connections/${selectedConnId.value}/truncate`)
+      alert('Database truncated successfully')
+    } catch (e: any) {
+      alert('Failed to truncate database: ' + e.message)
+    }
+  }
+}
+
+const triggerImportSQL = () => {
+  sqlFileInput.value?.click()
+}
+
+const handleSQLImport = async (event: Event) => {
+  const target = event.target as HTMLInputElement
+  const file = target.files?.[0]
+  if (!file || !selectedConnId.value) return
+  
+  const formData = new FormData()
+  formData.append('file', file)
+  
+  try {
+    await http.post(`/api/connections/${selectedConnId.value}/import`, formData, {
+      headers: { 'Content-Type': 'multipart/form-data' }
+    })
+    alert('SQL imported successfully')
+  } catch (e: any) {
+    alert('Failed to import SQL: ' + e.message)
+  }
+  target.value = ''
+}
+
+const exportDatabase = async () => {
+  if (!selectedConnId.value) return
+  try {
+    const response = await http.get(`/api/connections/${selectedConnId.value}/export`, {
+      responseType: 'blob'
+    })
+    const url = window.URL.createObjectURL(response.data)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `database-export-${new Date().toISOString().split('T')[0]}.sql`
+    a.click()
+    window.URL.revokeObjectURL(url)
+    alert('Database exported successfully')
+  } catch (e: any) {
+    alert('Failed to export database: ' + e.message)
+  }
 }
 
 async function loadCatalogRoles() {
@@ -1310,6 +1403,7 @@ async function submitRowUpdate() {
           Queries
         </button>
         <button :class="{ on: nav === 'users' }" type="button" @click="nav = 'users'">Users</button>
+        <button :class="{ on: nav === 'operations' }" type="button" @click="nav = 'operations'">Operations</button>
       </div>
     </aside>
 
@@ -1450,6 +1544,47 @@ async function submitRowUpdate() {
             </label>
             <button type="submit" class="primary">Create user</button>
           </form>
+        </div>
+      </div>
+
+      <div v-else-if="nav === 'operations'" class="panel operations-panel">
+        <div class="pane-wide">
+          <h3>Database Operations</h3>
+          <p class="muted small">Perform operations on the current database</p>
+          
+          <div class="operations-grid">
+            <div class="op-card" @click="confirmDeleteDB">
+              <div class="op-icon delete">🗑️</div>
+              <div class="op-label">Delete Database</div>
+              <div class="op-desc">Drop the entire database</div>
+            </div>
+            
+            <div class="op-card" @click="confirmTruncateDB">
+              <div class="op-icon truncate">🧹</div>
+              <div class="op-label">Truncate Database</div>
+              <div class="op-desc">Delete all data from tables</div>
+            </div>
+            
+            <div class="op-card" @click="triggerImportSQL">
+              <div class="op-icon import">📥</div>
+              <div class="op-label">Import SQL</div>
+              <div class="op-desc">Import SQL dump file</div>
+            </div>
+            
+            <div class="op-card" @click="exportDatabase">
+              <div class="op-icon export">📤</div>
+              <div class="op-label">Export SQL</div>
+              <div class="op-desc">Export database as SQL</div>
+            </div>
+            
+            <div class="op-card" @click="triggerRenameDB">
+              <div class="op-icon rename">✏️</div>
+              <div class="op-label">Rename Database</div>
+              <div class="op-desc">Change database name</div>
+            </div>
+          </div>
+          
+          <input type="file" ref="sqlFileInput" accept=".sql" style="display: none" @change="handleSQLImport" />
         </div>
       </div>
 
@@ -3234,6 +3369,46 @@ h3 {
 }
 .hint {
   padding: 1rem;
+  color: #8b949e;
+}
+
+/* Operations Panel */
+.operations-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 1rem;
+  margin-top: 1.5rem;
+}
+
+.op-card {
+  padding: 1.5rem;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  background: #161b22;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  text-align: center;
+}
+
+.op-card:hover {
+  background: #21262d;
+  border-color: #58a6ff;
+  transform: translateY(-2px);
+}
+
+.op-icon {
+  font-size: 2rem;
+  margin-bottom: 0.5rem;
+}
+
+.op-label {
+  font-weight: 600;
+  font-size: 1rem;
+  margin-bottom: 0.25rem;
+}
+
+.op-desc {
+  font-size: 0.8rem;
   color: #8b949e;
 }
 </style>
