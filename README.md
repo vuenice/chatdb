@@ -1,31 +1,46 @@
 # ChatDB
 
-Single-binary database viewer with a Vue 3 SPA frontend and a small plain-Go API. Saved connections target **PostgreSQL** or **MySQL/MariaDB**, and chatdb stores its own users + connection registry in a local **SQLite** file alongside the binary.
+ChatDB is a **single-binary** database viewer + lightweight API.
 
-The legacy Goravel implementation is preserved under [`old_goravel_backend/`](old_goravel_backend/) for reference.
+- **Backend**: plain Go (chi router), ships as one executable
+- **Frontend**: Vue 3 SPA, embedded into the Go binary via `go:embed`
+- **Targets**: PostgreSQL and MySQL/MariaDB (browse + run SQL)
+- **Metadata**: local SQLite file (`chatdb.meta.sqlite`) for users + connection registry
 
-## Layout
+## Features
 
-| Path | Role |
-|------|------|
-| [`backend/cmd/chatdb`](backend/cmd/chatdb) | Entry point. Loads config, bootstraps metadata, serves API + embedded SPA. |
-| [`backend/internal/config`](backend/internal/config) | JSON config loader (`-config` flag, defaults, validation). |
-| [`backend/internal/migrate`](backend/internal/migrate) | Idempotent SQLite DDL for `users` + `db_connections`. |
-| [`backend/internal/store`](backend/internal/store) | Typed queries against the SQLite metadata DB. |
-| [`backend/internal/engine`](backend/internal/engine) | `Engine` interface with Postgres + MySQL implementations. |
-| [`backend/internal/api`](backend/internal/api) | HTTP handlers (chi router). |
-| [`backend/internal/auth`](backend/internal/auth) | bcrypt + JWT helpers + middleware. |
-| [`backend/web/dist`](backend/web/dist) | Built SPA, populated by `make frontend`, embedded at compile time. |
-| [`frontend/`](frontend/) | Vue 3 + Vite source. |
+- **Auth**: register/login with JWT (`/api/register`, `/api/login`, `/api/me`)
+- **Connection registry**: save a DB connection (credentials **encrypted at rest**)
+- **Browse catalog**:
+  - databases
+  - tables + columns + indexes
+  - preview rows (paged)
+- **Run SQL**: execute queries on read/write pools + **cancel** in-flight runs
+- **Edit data**: update a row (best-effort; see “Notes” below)
+- **DB operations (basic)**:
+  - truncate database tables
+  - delete database
+  - rename database
+  - import SQL (upload)
+  - export SQL (minimal placeholder export in current build)
+- **Bulk table operations**: drop / truncate / analyze / optimize / repair / check across multiple tables
 
-## Configuration
+## Quickstart (single binary)
 
-Copy and edit [`backend/chatdb.config.example.json`](backend/chatdb.config.example.json) to e.g. `backend/chatdb.config.json` (the binary defaults to that path; override with `-config /path/to/file.json`):
+Prereqs: a recent Go + Node.js (for building the SPA).
+
+1) Create a config:
+
+```bash
+cp backend/chatdb.config.example.json backend/chatdb.config.json
+```
+
+2) Edit `backend/chatdb.config.json`:
 
 ```json
 {
   "listen": "127.0.0.1:3000",
-  "jwt_secret": "long-random-string",
+  "jwt_secret": "change-me-to-a-long-random-string",
   "app_key": "32-byte-key-change-me-aaaaaaaaaa",
   "metadata": {
     "path": "chatdb.meta.sqlite"
@@ -33,67 +48,165 @@ Copy and edit [`backend/chatdb.config.example.json`](backend/chatdb.config.examp
 }
 ```
 
-- `app_key` must be **exactly 32 bytes** (used as the AES-256-GCM key for stored connection passwords).
-- `metadata.path` is the SQLite file that holds chatdb's own `users` and `db_connections` tables. It is created on first startup (with `journal_mode=WAL` and foreign keys enabled). Relative paths resolve against the binary's working directory; back this file up the same way you back up `chatdb.config.json`.
-- The saved **target** databases (what users browse) still live in their own Postgres or MySQL/MariaDB servers and are added at runtime via the UI or `POST /api/connections` — chatdb supports any number of them.
-
-### Migrating from the old Postgres/MySQL metadata layout
-
-Earlier builds stored chatdb's own tables inside an `app_database` you configured (Postgres schema or MySQL database). That `app_database` block is **no longer accepted** by the config loader. To migrate an existing install:
-
-1. Start the new build once with a fresh `metadata.path` so the SQLite schema is created.
-2. Copy `users` and `db_connections` rows from the old metadata location into the new SQLite file (`sqlite3 chatdb.meta.sqlite`). Keep `app_key` unchanged so the encrypted `read_password` / `write_password` columns stay decryptable; otherwise re-add connections through the UI.
-3. Remove the old `app_database` block from `chatdb.config.json`.
-
-## Build a single binary
-
-Requires Go 1.22+ and Node 18+.
+3) Build and run:
 
 ```bash
 make build
+./chatdb -config backend/chatdb.config.json
 ```
 
-Produces `./chatdb` (CGO disabled, suitable for any modern Linux x86_64). The Vue app is embedded via `go:embed`, so the binary serves both the SPA and the JSON API on `listen`. Ship the binary plus your `chatdb.config.json` and the SQLite metadata file (file permissions `0600` recommended for both).
+Then open `http://127.0.0.1:3000`.
 
 ## Development
 
-In two terminals:
+Backend (API + embedded SPA when built):
 
 ```bash
-make dev-backend    # go run ./cmd/chatdb on :3000
-make dev-frontend   # vite on :5173, proxies /api to :3000
+make dev-backend
 ```
 
-on windows
-```sh
-cd backend
-go run .\cmd\chatdb -config .\chatdb.config.json
-```
-```sh
-cd frontend
-npm run dev
-```
-
-## Sample databases (optional)
+Frontend dev server:
 
 ```bash
-docker compose up -d
+make dev-frontend
 ```
 
-Brings up a sample customer Postgres on `:5434` you can register as a target via the UI (credentials in [`docker-compose.yml`](docker-compose.yml) and [`scripts/init-sample-db.sql`](scripts/init-sample-db.sql)). chatdb's own metadata stays in the local SQLite file regardless.
+## API (current surface)
 
-## API surface (v1 viewer)
+All endpoints are rooted at `/api`. Everything except health/register/login/connection-labels requires an `Authorization: Bearer <token>` header.
 
-- `POST /api/register`, `POST /api/login`, `GET /api/me`
-- `GET|POST|PUT|DELETE /api/connections` (+ `/{id}`)
-- `GET /api/connections/{id}/databases|tables|columns|rows`
-- `POST /api/connections/{id}/sql/execute|cancel`
+### Auth
+
+- `POST /api/register`
+- `POST /api/login`
+- `GET /api/me`
+- `GET /api/connection-labels`
 - `GET /api/health`
 
-The endpoints from the legacy app for **AI chat**, **saved/recent queries**, **monitoring**, **schema graph**, and **EXPLAIN** are stubbed (return empty/disabled payloads) so the existing UI keeps working without errors. Reintroduce them as needed.
+**Register** creates:
+- a ChatDB user (stored in the local metadata SQLite)
+- a first DB connection record under the provided `connection_name`
+- a JWT token to use for subsequent requests
 
-## Notes
+Example:
 
-- `connections.driver` may be `"postgres"` or `"mysql"`. Defaults to `postgres` for compatibility with the existing UI.
-- Identifier quoting differs per dialect; the row-preview endpoint validates schema/table names with a strict regex before quoting.
-- Stored connection passwords are AES-256-GCM encrypted with `app_key`; only the encrypted form ever leaves the binary.
+```bash
+curl -sS -X POST "http://127.0.0.1:3000/api/register" \
+  -H 'content-type: application/json' \
+  -d '{
+    "connection_name":"local-dev",
+    "driver":"postgres",
+    "host":"127.0.0.1",
+    "port":5432,
+    "database":"postgres",
+    "ssl_mode":"disable",
+    "read_username":"postgres",
+    "read_password":"postgres",
+    "write_username":"postgres",
+    "write_password":"postgres",
+    "allowed_schemas":["public"]
+  }'
+```
+
+### Connections
+
+- `GET /api/connections`
+- `POST /api/connections`
+- `GET /api/connections/{id}`
+- `PUT /api/connections/{id}`
+- `DELETE /api/connections/{id}`
+
+Notes:
+- This build currently enforces **one connection per user** (creating a second returns HTTP 409).
+- Passwords are never returned by the API; they are stored **encrypted** in the metadata SQLite.
+
+### Catalog / browsing
+
+- `GET /api/connections/{id}/databases`
+- `GET /api/connections/{id}/tables?schema=...`
+- `GET /api/connections/{id}/columns?schema=...&table=...`
+- `GET /api/connections/{id}/indexes?schema=...&table=...`
+- `GET /api/connections/{id}/rows?schema=...&table=...&limit=...&offset=...`
+- `POST /api/connections/{id}/rows/update`
+
+Catalog admin (driver-dependent):
+
+- `GET /api/connections/{id}/catalog/roles`
+- `GET /api/connections/{id}/catalog/login_users`
+- `POST /api/connections/{id}/catalog/users`
+
+### SQL execution
+
+- `POST /api/connections/{id}/sql/execute`
+- `POST /api/connections/{id}/sql/cancel`
+
+`/sql/execute` payload:
+
+```json
+{
+  "sql": "select 1",
+  "pool": "read",
+  "max_rows": 200,
+  "database": "optional-db-name",
+  "role": "optional-role-name"
+}
+```
+
+### DB operations
+
+- `POST /api/connections/{id}/truncate`
+- `POST /api/connections/{id}/delete`
+- `POST /api/connections/{id}/rename` (`{"new_name":"..."}`)
+- `POST /api/connections/{id}/import` (multipart form upload: `file`)
+- `GET /api/connections/{id}/export`
+
+### Bulk table operations
+
+- `POST /api/connections/{id}/bulk?database=...`
+
+Body:
+
+```json
+{
+  "operation": "truncate",
+  "tables": ["public.users", "public.orders"]
+}
+```
+
+Supported `operation`: `drop`, `truncate`, `analyze`, `optimize`, `repair`, `check`
+
+## What’s intentionally disabled (stubs)
+
+The legacy UI expects these endpoints; this backend returns safe placeholder payloads so the frontend doesn’t crash:
+
+- AI chat: `POST /api/connections/{id}/ai/chat` (disabled)
+- Schema graph: `GET /api/connections/{id}/schema_graph` (empty)
+- Monitoring: duplicate indexes / slow queries (unavailable)
+- EXPLAIN: `POST /api/connections/{id}/sql/explain` (disabled)
+- Saved/recent queries endpoints (return empty payloads in current router)
+
+## Security notes
+
+- `app_key` must be **exactly 32 bytes** (AES-256 key for encrypting stored DB passwords).
+- Keep `backend/chatdb.config.json` and `chatdb.meta.sqlite` **private** (recommended file mode: `0600`).
+- JWT signing uses `jwt_secret`; rotate it to invalidate existing sessions.
+
+## Repo layout
+
+- `backend/cmd/chatdb`: entrypoint (config + migrations + API + SPA)
+- `backend/internal/api`: HTTP handlers + router
+- `backend/internal/engine`: Postgres/MySQL engines (catalog + SQL)
+- `backend/internal/store`: SQLite metadata store
+- `backend/internal/migrate`: metadata schema bootstrap/upgrade
+- `backend/web/dist`: built SPA (embedded in the binary)
+- `frontend/`: Vue 3 app
+
+## Notes / known limitations
+
+- **One connection per user** is enforced in `POST /api/connections`.
+- `GET /api/connections/{id}/export` is currently a **placeholder** (it does not dump real schema/data yet).
+- Database “truncate” / bulk operations are dialect-sensitive; some SQL in these handlers may need refinement for strict Postgres/MySQL compatibility.
+
+## License
+
+Add your preferred license (MIT/Apache-2.0/etc.) and a `LICENSE` file at the repo root.
