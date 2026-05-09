@@ -65,6 +65,13 @@ declare module 'vue-router/auto-routes' {
       Record<never, never>,
       | never
     >,
+    '/WorkbenchView': RouteRecordInfo<
+      '/WorkbenchView',
+      '/WorkbenchView',
+      Record<never, never>,
+      Record<never, never>,
+      | never
+    >,
   }
 
   /**
@@ -111,6 +118,12 @@ declare module 'vue-router/auto-routes' {
     'src/views/workbench/query/index.vue': {
       routes:
         | '/workbench/query/'
+      views:
+        | never
+    }
+    'src/views/WorkbenchView.vue': {
+      routes:
+        | '/WorkbenchView'
       views:
         | never
     }
