@@ -44,6 +44,20 @@ declare module 'vue-router/auto-routes' {
       Record<never, never>,
       | never
     >,
+    '/workbench/export/': RouteRecordInfo<
+      '/workbench/export/',
+      '/workbench/export',
+      Record<never, never>,
+      Record<never, never>,
+      | never
+    >,
+    '/workbench/import/': RouteRecordInfo<
+      '/workbench/import/',
+      '/workbench/import',
+      Record<never, never>,
+      Record<never, never>,
+      | never
+    >,
     '/workbench/query/': RouteRecordInfo<
       '/workbench/query/',
       '/workbench/query',
@@ -79,6 +93,18 @@ declare module 'vue-router/auto-routes' {
     'src/views/workbench/index.vue': {
       routes:
         | '/workbench/'
+      views:
+        | never
+    }
+    'src/views/workbench/export/index.vue': {
+      routes:
+        | '/workbench/export/'
+      views:
+        | never
+    }
+    'src/views/workbench/import/index.vue': {
+      routes:
+        | '/workbench/import/'
       views:
         | never
     }

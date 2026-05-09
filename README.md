@@ -21,8 +21,9 @@ ChatDB is a **single-binary** database viewer + lightweight API.
   - truncate database tables
   - delete database
   - rename database
-  - import SQL (upload)
-  - export SQL (minimal placeholder export in current build)
+  - import / export via **Workbench → Operations** links to dedicated pages:
+    - **PostgreSQL**: `pg_dump` (plain `.sql` or custom-format `.dump`), import with `psql` or `pg_restore` (needs `postgresql-client` on the ChatDB host `PATH`)
+    - **MySQL**: upload import still runs through the app executor; export remains a minimal table listing
 - **Bulk table operations**: drop / truncate / analyze / optimize / repair / check across multiple tables
 
 ## Quickstart (single binary)
@@ -157,8 +158,8 @@ Catalog admin (driver-dependent):
 - `POST /api/connections/{id}/truncate`
 - `POST /api/connections/{id}/delete`
 - `POST /api/connections/{id}/rename` (`{"new_name":"..."}`)
-- `POST /api/connections/{id}/import` (multipart form upload: `file`)
-- `GET /api/connections/{id}/export`
+- `POST /api/connections/{id}/import` — multipart: `file`; for PostgreSQL include `format`: `psql` (plain `.sql`, runs `psql -f`) or `pgdump` (custom archive, runs `pg_restore`). Optional query `database=` for physical DB. MySQL: upload only (no `format`).
+- `GET /api/connections/{id}/export` — for PostgreSQL, query `format=plain` (default; text SQL) or `format=archive` (`pg_dump -Fc`). Optional `database=` for physical DB override. MySQL returns a small placeholder listing.
 
 ### Bulk table operations
 
@@ -204,7 +205,7 @@ The legacy UI expects these endpoints; this backend returns safe placeholder pay
 ## Notes / known limitations
 
 - **One connection per user** is enforced in `POST /api/connections`.
-- `GET /api/connections/{id}/export` is currently a **placeholder** (it does not dump real schema/data yet).
+- PostgreSQL **full dumps** require `pg_dump`, `psql`, and **`pg_restore`** (for archives) installed on the machine running the ChatDB binary (e.g. `postgresql-client`). Large imports/uploads may hit reverse-proxy or client timeouts if you terminate TLS in front of the app.
 - Database “truncate” / bulk operations are dialect-sensitive; some SQL in these handlers may need refinement for strict Postgres/MySQL compatibility.
 
 ## License

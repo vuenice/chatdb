@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { ref, watch, onMounted, onUnmounted, computed } from 'vue'
-import { useRouter } from 'vue-router'
-import { http } from '../api/http'
-import { useAuthStore } from '../stores/auth'
+import { useRouter, RouterLink } from 'vue-router'
+import { http } from '../../api/http'
+import { useAuthStore } from '../../stores/auth'
 
 const router = useRouter()
 const auth = useAuthStore()
@@ -107,6 +107,18 @@ function dbParams(): Record<string, string> {
   const o: Record<string, string> = {}
   if (selectedPhysicalDatabase.value) o.database = selectedPhysicalDatabase.value
   return o
+}
+
+/** Query params for /workbench/export and /workbench/import */
+const opsRouteQuery = computed(() => {
+  const q: Record<string, string> = {}
+  if (selectedConnId.value != null) q.connection = String(selectedConnId.value)
+  if (selectedPhysicalDatabase.value) q.database = selectedPhysicalDatabase.value
+  return q
+})
+
+function alertSelectConnection() {
+  window.alert('Select a connection from the header first.')
 }
 
 const currentConnection = computed(() => connections.value.find((x) => x.id === selectedConnId.value) ?? null)
@@ -462,7 +474,6 @@ async function loadDatabases() {
 }
 
 // Operations functions
-const sqlFileInput = ref<HTMLInputElement | null>(null)
 
 const confirmDeleteDB = async () => {
   if (!selectedConnId.value) return
@@ -510,47 +521,6 @@ const confirmTruncateDB = async () => {
     } catch (e: any) {
       alert('Failed to truncate database: ' + e.message)
     }
-  }
-}
-
-const triggerImportSQL = () => {
-  sqlFileInput.value?.click()
-}
-
-const handleSQLImport = async (event: Event) => {
-  const target = event.target as HTMLInputElement
-  const file = target.files?.[0]
-  if (!file || !selectedConnId.value) return
-  
-  const formData = new FormData()
-  formData.append('file', file)
-  
-  try {
-    await http.post(`/api/connections/${selectedConnId.value}/import`, formData, {
-      headers: { 'Content-Type': 'multipart/form-data' }
-    })
-    alert('SQL imported successfully')
-  } catch (e: any) {
-    alert('Failed to import SQL: ' + e.message)
-  }
-  target.value = ''
-}
-
-const exportDatabase = async () => {
-  if (!selectedConnId.value) return
-  try {
-    const response = await http.get(`/api/connections/${selectedConnId.value}/export`, {
-      responseType: 'blob'
-    })
-    const url = window.URL.createObjectURL(response.data)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `database-export-${new Date().toISOString().split('T')[0]}.sql`
-    a.click()
-    window.URL.revokeObjectURL(url)
-    alert('Database exported successfully')
-  } catch (e: any) {
-    alert('Failed to export database: ' + e.message)
   }
 }
 
@@ -661,14 +631,25 @@ async function loadQueries() {
       UpdatedAt?: string
     })[]
   }>(`/api/connections/${selectedConnId.value}/queries`, { params: qparams })
-  savedQueries.value = (data.queries || []).map((r) => ({
-    id: r.id,
-    title: r.title,
-    sql: r.sql,
-    is_saved: r.is_saved,
-    last_run_at: r.last_run_at ?? (r as { LastRunAt?: string }).LastRunAt,
-    updated_at: r.updated_at ?? (r as { UpdatedAt?: string }).UpdatedAt,
-  }))
+  savedQueries.value = (data.queries || []).map(
+    (r: {
+      id: number
+      title?: string
+      sql?: string
+      is_saved?: boolean
+      last_run_at?: string
+      updated_at?: string
+      LastRunAt?: string
+      UpdatedAt?: string
+    }) => ({
+      id: r.id,
+      title: r.title ?? '',
+      sql: r.sql ?? '',
+      is_saved: Boolean(r.is_saved),
+      last_run_at: r.last_run_at ?? r.LastRunAt,
+      updated_at: r.updated_at ?? r.UpdatedAt,
+    }),
+  )
 }
 
 async function loadQueryHistory() {
@@ -1565,16 +1546,34 @@ async function submitRowUpdate() {
               <div class="op-desc">Delete all data from tables</div>
             </div>
             
-            <div class="op-card" @click="triggerImportSQL">
+            <RouterLink
+              v-if="selectedConnId"
+              class="op-card op-card-link"
+              :to="{ path: '/workbench/import', query: opsRouteQuery }"
+            >
               <div class="op-icon import">📥</div>
-              <div class="op-label">Import SQL</div>
-              <div class="op-desc">Import SQL dump file</div>
+              <div class="op-label">Import</div>
+              <div class="op-desc">psql / pg_restore or MySQL upload</div>
+            </RouterLink>
+            <div v-else class="op-card" role="button" tabindex="0" @click="alertSelectConnection">
+              <div class="op-icon import">📥</div>
+              <div class="op-label">Import</div>
+              <div class="op-desc">Select a connection first</div>
             </div>
-            
-            <div class="op-card" @click="exportDatabase">
+
+            <RouterLink
+              v-if="selectedConnId"
+              class="op-card op-card-link"
+              :to="{ path: '/workbench/export', query: opsRouteQuery }"
+            >
               <div class="op-icon export">📤</div>
-              <div class="op-label">Export SQL</div>
-              <div class="op-desc">Export database as SQL</div>
+              <div class="op-label">Export</div>
+              <div class="op-desc">pg_dump plain or archive</div>
+            </RouterLink>
+            <div v-else class="op-card" role="button" tabindex="0" @click="alertSelectConnection">
+              <div class="op-icon export">📤</div>
+              <div class="op-label">Export</div>
+              <div class="op-desc">Select a connection first</div>
             </div>
             
             <div class="op-card" @click="triggerRenameDB">
@@ -1584,7 +1583,6 @@ async function submitRowUpdate() {
             </div>
           </div>
           
-          <input type="file" ref="sqlFileInput" accept=".sql" style="display: none" @change="handleSQLImport" />
         </div>
       </div>
 
@@ -3410,5 +3408,11 @@ h3 {
 .op-desc {
   font-size: 0.8rem;
   color: #8b949e;
+}
+
+.operations-grid a.op-card-link {
+  text-decoration: none;
+  color: inherit;
+  display: block;
 }
 </style>

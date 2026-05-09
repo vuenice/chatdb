@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"strings"
 )
 
 // handleDeleteDatabase drops the entire database
@@ -91,7 +93,7 @@ func (s *Server) handleRenameDatabase(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-writeJSON(w, http.StatusOK, map[string]any{"ok": true, "old_name": oldName, "new_name": req.NewName})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "old_name": oldName, "new_name": req.NewName})
 }
 
 // handleTruncateDatabase truncates all tables in the database
@@ -126,7 +128,14 @@ func (s *Server) handleTruncateDatabase(w http.ResponseWriter, r *http.Request) 
 
 // handleImportSQL imports SQL from a file upload
 func (s *Server) handleImportSQL(w http.ResponseWriter, r *http.Request) {
-	eng, _, err := s.resolveEngine(r, false)
+	if err := r.ParseMultipartForm(512 << 20); err != nil {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("multipart parse: %w", err))
+		return
+	}
+
+	format := strings.TrimSpace(r.FormValue("format"))
+
+	eng, conn, err := s.resolveEngine(r, true)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
@@ -139,21 +148,82 @@ func (s *Server) handleImportSQL(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	// Read the file content
-	content, err := io.ReadAll(file)
+	dbName, err := effectivePhysicalDatabase(conn, strings.TrimSpace(r.URL.Query().Get("database")))
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err)
+		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
 
-	// Execute the SQL content
-	_, err = eng.Execute(r.Context(), string(content), 10000)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, fmt.Errorf("failed to import SQL: %w", err))
+	switch conn.Driver {
+	case "mysql":
+		if format != "" && (strings.EqualFold(format, importFormatPsql) || strings.EqualFold(format, importFormatPgdump)) {
+			writeErr(w, http.StatusBadRequest, fmt.Errorf("psql/pg_dump archive import applies to PostgreSQL only"))
+			return
+		}
+		content, err := io.ReadAll(file)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		_, err = eng.Execute(r.Context(), string(content), 10000)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, fmt.Errorf("failed to import SQL: %w", err))
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 		return
-	}
+	case "postgres":
+		imFmt := strings.ToLower(format)
+		if imFmt == "" {
+			imFmt = importFormatPsql
+		}
+		if imFmt != importFormatPsql && imFmt != importFormatPgdump {
+			writeErr(w, http.StatusBadRequest, errWrongImportFormat)
+			return
+		}
+		tmpPath, err := saveUploadToTemp(file, "chatdb-import-*")
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		defer os.Remove(tmpPath)
 
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		user, pass, err := s.decryptedConnAuth(conn, true)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
+
+		ctx, cancel := exportContext(r.Context())
+		defer cancel()
+
+		switch imFmt {
+		case importFormatPsql:
+			psqlPath, err := lookPostgresTool("psql")
+			if err != nil {
+				writeErr(w, http.StatusServiceUnavailable, err)
+				return
+			}
+			if err := runPsqlFile(ctx, psqlPath, conn, dbName, user, pass, tmpPath); err != nil {
+				writeErr(w, http.StatusInternalServerError, fmt.Errorf("psql import failed: %v", err))
+				return
+			}
+		case importFormatPgdump:
+			restorePath, err := lookPostgresTool("pg_restore")
+			if err != nil {
+				writeErr(w, http.StatusServiceUnavailable, err)
+				return
+			}
+			if err := runPgRestoreFile(ctx, restorePath, conn, dbName, user, pass, tmpPath); err != nil {
+				writeErr(w, http.StatusInternalServerError, fmt.Errorf("pg_restore failed: %v", err))
+				return
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		return
+	default:
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("unsupported driver: %s", conn.Driver))
+	}
 }
 
 // handleExportSQL exports the database as SQL
@@ -164,24 +234,105 @@ func (s *Server) handleExportSQL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Export as text format
-	var output string
-	tables, err := eng.ListTables(r.Context(), "")
+	if conn.Driver != "postgres" {
+		dbLabel, err := effectivePhysicalDatabase(conn, strings.TrimSpace(r.URL.Query().Get("database")))
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		var output string
+		tables, err := eng.ListTables(r.Context(), "")
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
+
+		for _, table := range tables {
+			output += fmt.Sprintf("-- Table: %s\n", table.Name)
+			output += "-- Data exported from ChatDB\n\n"
+		}
+
+		if output == "" {
+			output = fmt.Sprintf("-- Database: %s\n-- Exported from ChatDB", dbLabel)
+		}
+
+		fn := sanitizedExportBase(dbLabel) + ".sql"
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s", fn))
+		_, _ = w.Write([]byte(output))
+		return
+	}
+
+	exFmt := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("format")))
+	if exFmt == "" {
+		exFmt = exportFormatPlain
+	}
+	if exFmt != exportFormatPlain && exFmt != exportFormatArchive {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("export format must be plain (SQL) or archive (pg_dump custom)"))
+		return
+	}
+
+	dbName, err := effectivePhysicalDatabase(conn, strings.TrimSpace(r.URL.Query().Get("database")))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+
+	user, pass, err := s.decryptedConnAuth(conn, false)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
 
-	for _, table := range tables {
-		output += fmt.Sprintf("-- Table: %s\n", table.Name)
-		output += "-- Data exported from ChatDB\n\n"
+	pgDumpPath, err := lookPostgresTool("pg_dump")
+	if err != nil {
+		writeErr(w, http.StatusServiceUnavailable, err)
+		return
 	}
 
-	if output == "" {
-		output = fmt.Sprintf("-- Database: %s\n-- Exported from ChatDB", conn.Database)
+	ctx, cancel := exportContext(r.Context())
+	defer cancel()
+
+	tmpFile, err := os.CreateTemp("", "chatdb-export-*")
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	tmpPath := tmpFile.Name()
+	_ = tmpFile.Close()
+	defer os.Remove(tmpPath)
+
+	customFormat := exFmt == exportFormatArchive
+	if err := runPgDump(ctx, pgDumpPath, conn, dbName, user, pass, customFormat, tmpPath); err != nil {
+		writeErr(w, http.StatusInternalServerError, fmt.Errorf("pg_dump failed: %v", err))
+		return
 	}
 
-	w.Header().Set("Content-Type", "text/plain")
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s.sql", conn.Database))
-	_, _ = w.Write([]byte(output))
+	f, err := os.Open(tmpPath)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	defer f.Close()
+
+	fi, err := f.Stat()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	base := sanitizedExportBase(dbName)
+	var ext, ctype string
+	if customFormat {
+		ext = ".dump"
+		ctype = "application/octet-stream"
+	} else {
+		ext = ".sql"
+		ctype = "text/plain; charset=utf-8"
+	}
+	dlName := base + ext
+
+	w.Header().Set("Content-Type", ctype)
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s", dlName))
+	http.ServeContent(w, r, dlName, fi.ModTime(), f)
 }
