@@ -13,12 +13,16 @@ interface Connection {
 /** UI maps to API: plain = text SQL for psql; archive = pg_dump -Fc */
 type ArchiveKind = 'plain' | 'archive'
 
+/** API query param scope: full dump, DDL only, or data only */
+type ExportScope = 'both' | 'schema' | 'data'
+
 const route = useRoute()
 
 const connections = ref<Connection[]>([])
 const databases = ref<string[]>([])
 const selectedConnId = ref<number | null>(null)
 const selectedPhysicalDatabase = ref('')
+const exportScope = ref<ExportScope>('both')
 const archiveKind = ref<ArchiveKind>('plain')
 const busy = ref(false)
 const loadErr = ref('')
@@ -35,19 +39,41 @@ const currentConnection = computed(
 
 const isPostgres = computed(() => currentConnection.value?.driver === 'postgres')
 
+const scopeInfoLines = computed(() => {
+  switch (exportScope.value) {
+    case 'both':
+      return [
+        'Schema and data: full pg_dump (DDL, indexes, constraints, and all row data).',
+      ]
+    case 'schema':
+      return [
+        'Schema only: DDL (tables, indexes, constraints, etc.) — no row data.',
+        'Server runs pg_dump with --schema-only.',
+      ]
+    case 'data':
+      return [
+        'Data only: row data — no CREATE TABLE or other DDL.',
+        'Server runs pg_dump with --data-only.',
+      ]
+  }
+})
+
 const infoTitle = computed(() =>
   archiveKind.value === 'plain' ? 'Plain SQL (psql)' : 'pg_dump archive',
 )
 
 const infoBody = computed(() => {
+  const scopeLines = scopeInfoLines.value
   if (archiveKind.value === 'plain') {
     return [
+      ...scopeLines,
       'Produces a readable .sql script using pg_dump in plain text mode.',
       'Restore anywhere with psql -f dump.sql or use the Import page with type “Plain SQL (psql)”.',
       'Equivalent: pg_dump -h … -p … -U … --no-owner -d … > db.sql',
     ]
   }
   return [
+    ...scopeLines,
     'Produces a PostgreSQL custom-format binary file (pg_dump -Fc).',
     'Smaller and faster restores for large databases; restored with pg_restore, not plain psql.',
     'Use the Import page with type “pg_dump archive” for this file.',
@@ -151,7 +177,7 @@ async function download() {
     const format =
       isPostgres.value && archiveKind.value === 'archive' ? 'archive' : 'plain'
     const response = await http.get(`/api/connections/${selectedConnId.value}/export`, {
-      params: { format, ...dbParams() },
+      params: { format, scope: exportScope.value, ...dbParams() },
       responseType: 'blob',
       timeout: 3_600_000,
       validateStatus: (s) => s < 500,
@@ -209,6 +235,38 @@ async function download() {
         </select>
       </div>
 
+      <p class="io-section-label">What to export</p>
+      <div class="format-grid scope-grid">
+        <button
+          type="button"
+          class="format-card"
+          :class="{ active: exportScope === 'schema' }"
+          @click="exportScope = 'schema'"
+        >
+          <span class="format-name">Schema only</span>
+          <span class="format-hint muted small">DDL, no rows</span>
+        </button>
+        <button
+          type="button"
+          class="format-card"
+          :class="{ active: exportScope === 'data' }"
+          @click="exportScope = 'data'"
+        >
+          <span class="format-name">Data only</span>
+          <span class="format-hint muted small">Rows, no DDL</span>
+        </button>
+        <button
+          type="button"
+          class="format-card"
+          :class="{ active: exportScope === 'both' }"
+          @click="exportScope = 'both'"
+        >
+          <span class="format-name">Schema and data</span>
+          <span class="format-hint muted small">Full dump (default)</span>
+        </button>
+      </div>
+
+      <p class="io-section-label">Output format</p>
       <div class="format-grid">
         <button
           type="button"
@@ -236,7 +294,8 @@ async function download() {
           <li v-for="(line, i) in infoBody" :key="i">{{ line }}</li>
         </ul>
         <p v-if="!isPostgres && currentConnection" class="muted small">
-          MySQL connections still download the lightweight table listing from the API until a mysqldump path is added.
+          MySQL connections still download the lightweight table listing from the API until mysqldump is wired in.
+          Schema/data selection above applies to PostgreSQL only and does not change the MySQL placeholder export.
         </p>
       </section>
 
@@ -303,10 +362,25 @@ async function download() {
   background: #161b22;
   color: #e6edf3;
 }
+.io-section-label {
+  margin: 0 0 0.4rem;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #8b949e;
+}
 .format-grid {
   display: grid;
   gap: 0.65rem;
   margin-bottom: 1.25rem;
+}
+.scope-grid {
+  grid-template-columns: 1fr;
+}
+@media (min-width: 480px) {
+  .scope-grid {
+    grid-template-columns: repeat(3, 1fr);
+  }
 }
 .format-card {
   text-align: left;

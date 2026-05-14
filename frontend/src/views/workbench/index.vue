@@ -10,6 +10,7 @@ const auth = useAuthStore()
 type Nav = 'tables' | 'queries' | 'users' | 'history' | 'operations'
 type QueriesTab = 'chatsql' | 'saved' | 'running'
 type TableTab = 'structure' | 'data' | 'indexes'
+type OperationsTab = 'export' | 'import' | 'delete' | 'truncate' | 'rename'
 
 interface Connection {
   id: number
@@ -31,6 +32,7 @@ interface TableMeta {
 }
 
 const nav = ref<Nav>('tables')
+const operationsTab = ref<OperationsTab>('export')
 /** Display name for the active SQL "file" in the workbench header. */
 const queryFileName = ref('untitled.sql')
 const connections = ref<Connection[]>([])
@@ -1386,6 +1388,48 @@ async function submitRowUpdate() {
         <button :class="{ on: nav === 'users' }" type="button" @click="nav = 'users'">Users</button>
         <button :class="{ on: nav === 'operations' }" type="button" @click="nav = 'operations'">Operations</button>
       </div>
+      <div
+        v-if="nav === 'operations'"
+        class="nav-sub"
+        role="group"
+        aria-label="Operations"
+      >
+        <button
+          :class="{ on: operationsTab === 'export' }"
+          type="button"
+          @click="operationsTab = 'export'"
+        >
+          Export
+        </button>
+        <button
+          :class="{ on: operationsTab === 'import' }"
+          type="button"
+          @click="operationsTab = 'import'"
+        >
+          Import
+        </button>
+        <button
+          :class="{ on: operationsTab === 'delete' }"
+          type="button"
+          @click="operationsTab = 'delete'"
+        >
+          Delete
+        </button>
+        <button
+          :class="{ on: operationsTab === 'truncate' }"
+          type="button"
+          @click="operationsTab = 'truncate'"
+        >
+          Truncate
+        </button>
+        <button
+          :class="{ on: operationsTab === 'rename' }"
+          type="button"
+          @click="operationsTab = 'rename'"
+        >
+          Rename
+        </button>
+      </div>
     </aside>
 
     <main class="main">
@@ -1531,58 +1575,63 @@ async function submitRowUpdate() {
       <div v-else-if="nav === 'operations'" class="panel operations-panel">
         <div class="pane-wide">
           <h3>Database Operations</h3>
-          <p class="muted small">Perform operations on the current database</p>
-          
-          <div class="operations-grid">
-            <div class="op-card" @click="confirmDeleteDB">
-              <div class="op-icon delete">🗑️</div>
-              <div class="op-label">Delete Database</div>
-              <div class="op-desc">Drop the entire database</div>
-            </div>
-            
-            <div class="op-card" @click="confirmTruncateDB">
-              <div class="op-icon truncate">🧹</div>
-              <div class="op-label">Truncate Database</div>
-              <div class="op-desc">Delete all data from tables</div>
-            </div>
-            
-            <RouterLink
-              v-if="selectedConnId"
-              class="op-card op-card-link"
-              :to="{ path: '/workbench/import', query: opsRouteQuery }"
-            >
-              <div class="op-icon import">📥</div>
-              <div class="op-label">Import</div>
-              <div class="op-desc">psql / pg_restore or MySQL upload</div>
-            </RouterLink>
-            <div v-else class="op-card" role="button" tabindex="0" @click="alertSelectConnection">
-              <div class="op-icon import">📥</div>
-              <div class="op-label">Import</div>
-              <div class="op-desc">Select a connection first</div>
-            </div>
+          <p class="muted small">Perform operations on the current database connection</p>
 
-            <RouterLink
-              v-if="selectedConnId"
-              class="op-card op-card-link"
-              :to="{ path: '/workbench/export', query: opsRouteQuery }"
-            >
-              <div class="op-icon export">📤</div>
-              <div class="op-label">Export</div>
-              <div class="op-desc">pg_dump plain or archive</div>
-            </RouterLink>
-            <div v-else class="op-card" role="button" tabindex="0" @click="alertSelectConnection">
-              <div class="op-icon export">📤</div>
-              <div class="op-label">Export</div>
-              <div class="op-desc">Select a connection first</div>
-            </div>
-            
-            <div class="op-card" @click="triggerRenameDB">
-              <div class="op-icon rename">✏️</div>
-              <div class="op-label">Rename Database</div>
-              <div class="op-desc">Change database name</div>
+          <div v-if="operationsTab === 'export'" class="ops-tab-panel">
+            <p class="muted small">
+              Open the export flow on a separate page (pg_dump-style output or dumps for the selected database).
+            </p>
+            <div class="ops-tab-actions">
+              <RouterLink
+                v-if="selectedConnId"
+                class="primary"
+                :to="{ path: '/workbench/export', query: opsRouteQuery }"
+              >
+                Open Export
+              </RouterLink>
+              <button v-else type="button" class="primary" @click="alertSelectConnection">Open Export</button>
             </div>
           </div>
-          
+
+          <div v-else-if="operationsTab === 'import'" class="ops-tab-panel">
+            <p class="muted small">
+              Open the import flow on a separate page (SQL upload / restore tooling will be wired here later).
+            </p>
+            <div class="ops-tab-actions">
+              <RouterLink
+                v-if="selectedConnId"
+                class="primary"
+                :to="{ path: '/workbench/import', query: opsRouteQuery }"
+              >
+                Open Import
+              </RouterLink>
+              <button v-else type="button" class="primary" @click="alertSelectConnection">Open Import</button>
+            </div>
+          </div>
+
+          <div v-else-if="operationsTab === 'delete'" class="ops-tab-panel">
+            <p>Permanently <strong>drop the entire database</strong> on the server. This cannot be undone.</p>
+            <p class="muted small">Uses the physical database selected in the header bar when applicable.</p>
+            <div class="ops-tab-actions">
+              <button type="button" class="primary danger" @click="confirmDeleteDB">Delete database</button>
+            </div>
+          </div>
+
+          <div v-else-if="operationsTab === 'truncate'" class="ops-tab-panel">
+            <p>Remove <strong>all row data</strong> from every table in the current database.</p>
+            <p class="muted small">Table structures remain; confirm before running.</p>
+            <div class="ops-tab-actions">
+              <button type="button" class="primary danger" @click="confirmTruncateDB">Truncate database</button>
+            </div>
+          </div>
+
+          <div v-else-if="operationsTab === 'rename'" class="ops-tab-panel">
+            <p>Rename the physical database.</p>
+            <p class="muted small">You will be prompted for the new name. Connection settings may refresh after rename.</p>
+            <div class="ops-tab-actions">
+              <button type="button" class="primary" @click="triggerRenameDB">Rename database…</button>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -2205,6 +2254,33 @@ async function submitRowUpdate() {
 }
 .nav-btns button:hover:not(.on) {
   background: #161b22;
+}
+.nav-sub {
+  display: flex;
+  flex-direction: column;
+  gap: 0.28rem;
+  padding-left: 0.65rem;
+  margin-top: 0.15rem;
+  border-left: 2px solid #21262d;
+}
+.nav-sub button {
+  padding: 0.35rem 0.45rem;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: #b1bac4;
+  cursor: pointer;
+  font-size: 0.8rem;
+  text-align: left;
+}
+.nav-sub button.on {
+  background: #1f6feb33;
+  border-color: #1f6feb;
+  color: #e6edf3;
+}
+.nav-sub button:hover:not(.on) {
+  background: #161b22;
+  color: #e6edf3;
 }
 .history-workspace {
   flex: 1;
@@ -2993,13 +3069,25 @@ input.search {
   cursor: pointer;
   font-weight: 600;
 }
+a.primary {
+  display: inline-block;
+  text-decoration: none;
+  text-align: center;
+}
+.primary.danger {
+  background: #da3633;
+}
+.primary.danger:hover {
+  background: #f85149;
+}
 .panel {
   flex: 1;
   display: flex;
   min-height: 0;
 }
 .panel.browse,
-.panel.users-panel {
+.panel.users-panel,
+.panel.operations-panel {
   padding: 0.75rem 1rem;
 }
 .pane-wide {
@@ -3370,49 +3458,21 @@ h3 {
   color: #8b949e;
 }
 
-/* Operations Panel */
-.operations-grid {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 1rem;
-  margin-top: 1.5rem;
+/* Operations tabbed panel */
+.ops-tab-panel {
+  margin-top: 1rem;
+  max-width: 36rem;
 }
-
-.op-card {
-  padding: 1.5rem;
-  border: 1px solid #30363d;
-  border-radius: 8px;
-  background: #161b22;
-  cursor: pointer;
-  transition: all 0.2s ease;
-  text-align: center;
+.ops-tab-panel p {
+  margin: 0 0 0.5rem;
+  font-size: 0.9rem;
+  line-height: 1.45;
 }
-
-.op-card:hover {
-  background: #21262d;
-  border-color: #58a6ff;
-  transform: translateY(-2px);
-}
-
-.op-icon {
-  font-size: 2rem;
-  margin-bottom: 0.5rem;
-}
-
-.op-label {
-  font-weight: 600;
-  font-size: 1rem;
-  margin-bottom: 0.25rem;
-}
-
-.op-desc {
-  font-size: 0.8rem;
-  color: #8b949e;
-}
-
-.operations-grid a.op-card-link {
-  text-decoration: none;
-  color: inherit;
-  display: block;
+.ops-tab-actions {
+  margin-top: 1rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
 }
 </style>

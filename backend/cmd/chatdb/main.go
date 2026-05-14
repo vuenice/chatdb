@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"flag"
 	"log"
 	"net/http"
 	"os"
@@ -21,10 +20,12 @@ import (
 )
 
 func main() {
-	configPath := flag.String("config", "chatdb.config.json", "Path to chatdb config JSON")
-	flag.Parse()
+	configPath, err := config.DefaultConfigPath()
+	if err != nil {
+		log.Fatalf("config path: %v", err)
+	}
 
-	cfg, err := config.Load(*configPath)
+	cfg, err := config.LoadOrCreate(configPath)
 	if err != nil {
 		log.Fatalf("config: %v", err)
 	}

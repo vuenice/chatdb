@@ -30,33 +30,26 @@ ChatDB is a **single-binary** database viewer + lightweight API.
 
 Prereqs: a recent Go + Node.js (for building the SPA).
 
-1) Create a config:
+On first start, ChatDB creates **`chatdb.config.json`** and **`chatdb.meta.sqlite`** under the OS user config directory (same folder):
 
-```bash
-cp backend/chatdb.config.example.json backend/chatdb.config.json
-```
+| OS | Typical path |
+|----|----------------|
+| Windows | `%APPDATA%\chatdb\` |
+| Linux | `$XDG_CONFIG_HOME/chatdb/` (default `~/.config/chatdb/`) |
+| macOS | `~/Library/Application Support/chatdb/` |
 
-2) Edit `backend/chatdb.config.json`:
+The first-run config uses **`listen`: `127.0.0.1:6366`**, random **`jwt_secret`** and **`app_key`**, and an absolute **`metadata.path`** next to the JSON file. You do not need to copy or author a config file by hand. Edit the JSON there if you want to change the listen address or rotate secrets.
 
-```json
-{
-  "listen": "127.0.0.1:3000",
-  "jwt_secret": "change-me-to-a-long-random-string",
-  "app_key": "32-byte-key-change-me-aaaaaaaaaa",
-  "metadata": {
-    "path": "chatdb.meta.sqlite"
-  }
-}
-```
-
-3) Build and run:
+Build and run:
 
 ```bash
 make build
-./chatdb -config backend/chatdb.config.json
+./chatdb
 ```
 
-Then open `http://127.0.0.1:3000`.
+Then open `http://127.0.0.1:6366`.
+
+[`backend/chatdb.config.example.json`](backend/chatdb.config.example.json) shows the JSON field names only; the binary does not read that file at runtime.
 
 ## Development
 
@@ -66,11 +59,46 @@ Backend (API + embedded SPA when built):
 make dev-backend
 ```
 
-Frontend dev server:
+Frontend dev server (Vite on `:5173`, proxies `/api` to the backend):
 
 ```bash
 make dev-frontend
 ```
+
+### Windows (without Make, or prefer explicit paths)
+
+From the repo root, use two terminals.
+
+Backend:
+
+```powershell
+cd backend
+go run .\cmd\chatdb
+```
+
+Frontend:
+
+```powershell
+cd frontend
+npm install
+npm run dev
+```
+
+### Sample database (optional)
+
+```bash
+docker compose up -d
+```
+
+Brings up sample Postgres on `:5434`; credentials and wiring are in [`docker-compose.yml`](docker-compose.yml) and [`scripts/init-sample-db.sql`](scripts/init-sample-db.sql). ChatDB’s own metadata lives in the SQLite file next to your auto-created `chatdb.config.json` (see Quickstart paths).
+
+### Migrating from old `app_database` metadata
+
+Earlier builds stored chatdb users and connection rows inside a Postgres/MySQL **app database**. The current config loader no longer accepts that shape (`DisallowUnknownFields`). To migrate:
+
+1. Start the new build once so the metadata SQLite file is created under your user config directory (see Quickstart).
+2. Copy `users` and `db_connections` from the old database into the new SQLite file (`sqlite3 chatdb.meta.sqlite`). Keep `app_key` unchanged so encrypted passwords stay decryptable, or re-add connections in the UI.
+3. If your `chatdb.config.json` still contains a legacy `app_database` key, remove it (`DisallowUnknownFields` rejects unknown keys).
 
 ## API (current surface)
 
@@ -92,7 +120,7 @@ All endpoints are rooted at `/api`. Everything except health/register/login/conn
 Example:
 
 ```bash
-curl -sS -X POST "http://127.0.0.1:3000/api/register" \
+curl -sS -X POST "http://127.0.0.1:6366/api/register" \
   -H 'content-type: application/json' \
   -d '{
     "connection_name":"local-dev",
@@ -189,7 +217,7 @@ The legacy UI expects these endpoints; this backend returns safe placeholder pay
 ## Security notes
 
 - `app_key` must be **exactly 32 bytes** (AES-256 key for encrypting stored DB passwords).
-- Keep `backend/chatdb.config.json` and `chatdb.meta.sqlite` **private** (recommended file mode: `0600`).
+- Keep `chatdb.config.json` and `chatdb.meta.sqlite` in your app data directory **private** (first-run file mode is `0600` where supported).
 - JWT signing uses `jwt_secret`; rotate it to invalidate existing sessions.
 
 ## Repo layout

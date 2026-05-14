@@ -21,6 +21,9 @@ const (
 	exportFormatArchive = "archive"
 	importFormatPsql    = "psql"
 	importFormatPgdump  = "pgdump"
+	exportScopeBoth     = "both"
+	exportScopeSchema   = "schema"
+	exportScopeData     = "data"
 )
 
 func postgresSSLMode(sslmode string) string {
@@ -65,16 +68,38 @@ func postgresCmdEnv(password, sslmode string) []string {
 	)
 }
 
+func parseExportScope(raw string) (string, error) {
+	v := strings.ToLower(strings.TrimSpace(raw))
+	if v == "" {
+		return exportScopeBoth, nil
+	}
+	switch v {
+	case exportScopeBoth, exportScopeSchema, exportScopeData:
+		return v, nil
+	default:
+		return "", fmt.Errorf("export scope must be both, schema, or data")
+	}
+}
+
 // runPgDump writes a dump to outPath. If customFormat, uses -Fc (pg_restore-compatible).
-func runPgDump(ctx context.Context, pgDumpPath string, conn *store.DbConnection, dbName, user, password string, customFormat bool, outPath string) error {
+// scope must be exportScopeBoth, exportScopeSchema, or exportScopeData.
+func runPgDump(ctx context.Context, pgDumpPath string, conn *store.DbConnection, dbName, user, password string, customFormat bool, scope string, outPath string) error {
 	args := []string{
 		"-h", conn.Host,
 		"-p", strconv.Itoa(conn.Port),
 		"-U", user,
 		"--no-owner",
-		"-d", dbName,
-		"-f", outPath,
 	}
+	switch scope {
+	case exportScopeSchema:
+		args = append(args, "--schema-only")
+	case exportScopeData:
+		args = append(args, "--data-only")
+	case exportScopeBoth:
+	default:
+		return fmt.Errorf("invalid export scope: %s", scope)
+	}
+	args = append(args, "-d", dbName, "-f", outPath)
 	if customFormat {
 		args = append([]string{"-Fc"}, args...)
 	}

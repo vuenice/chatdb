@@ -272,6 +272,12 @@ func (s *Server) handleExportSQL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	scope, err := parseExportScope(r.URL.Query().Get("scope"))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+
 	dbName, err := effectivePhysicalDatabase(conn, strings.TrimSpace(r.URL.Query().Get("database")))
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err)
@@ -303,7 +309,7 @@ func (s *Server) handleExportSQL(w http.ResponseWriter, r *http.Request) {
 	defer os.Remove(tmpPath)
 
 	customFormat := exFmt == exportFormatArchive
-	if err := runPgDump(ctx, pgDumpPath, conn, dbName, user, pass, customFormat, tmpPath); err != nil {
+	if err := runPgDump(ctx, pgDumpPath, conn, dbName, user, pass, customFormat, scope, tmpPath); err != nil {
 		writeErr(w, http.StatusInternalServerError, fmt.Errorf("pg_dump failed: %v", err))
 		return
 	}

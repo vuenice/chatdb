@@ -1,5 +1,5 @@
 {
-  "listen": "127.0.0.1:3000",
+  "listen": "127.0.0.1:6366",
   "jwt_secret": "change-me-to-a-long-random-string",
   "app_key": "32-byte-key-change-me-aaaaaaaaaa",
   "metadata": {

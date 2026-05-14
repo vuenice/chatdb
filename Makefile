@@ -13,7 +13,7 @@ backend:
 
 # Full release build: SPA + binary.
 build: frontend backend
-	@echo "Built ./chatdb (config: backend/chatdb.config.example.json)"
+	@echo "Built ./chatdb (first run creates config under OS user config dir; see README)"
 
 clean:
 	rm -rf chatdb backend/web/dist frontend/dist
@@ -21,7 +21,7 @@ clean:
 	echo "placeholder so go:embed has at least one file" > backend/web/dist/.gitkeep
 
 dev-backend:
-	cd backend && go run ./cmd/chatdb -config chatdb.config.json
+	cd backend && go run ./cmd/chatdb
 
 dev-frontend:
 	cd frontend && npm run dev
